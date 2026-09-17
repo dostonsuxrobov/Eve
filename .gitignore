@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*_key.txt
+*.key
+.env
+models/
+samples/out/
+bench/out/
+memory.json
+*.wav
+*.mp3
+!samples/*.wav

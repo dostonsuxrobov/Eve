@@ -1,0 +1,14 @@
+# core
+numpy
+sounddevice
+onnxruntime
+httpx
+websockets
+python-dotenv
+rich
+# local STT (optional)
+faster-whisper
+sherpa-onnx
+# local TTS (optional)
+kokoro-onnx
+soundfile
