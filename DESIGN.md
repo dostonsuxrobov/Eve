@@ -30,7 +30,9 @@ bench/               latency.py, conversation_eval.py, e2e_sim.py
 
 ## Hard-won environment facts
 
-* Windows 11, Python 3.13 venv at `.venv` (created with uv). Run with `.venv/Scripts/python.exe`.
+* Windows 11, Python 3.13 venv at `.venv` on a uv-managed CPython (`uv python install 3.13`).
+  The Microsoft Store Python cannot open the microphone (packaged app without the capability),
+  so never build the venv on it. Run with `.venv/Scripts/python.exe`.
   Set `PYTHONIOENCODING=utf-8` when printing model output (cp1252 console).
 * GPU: RTX 4050 laptop, 6 GB. Ollama already holds ~3 GB with qwen3:4b loaded.
   onnxruntime is CPU-only in the venv (fine for VAD, Kokoro, Parakeet int8).

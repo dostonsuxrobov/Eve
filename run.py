@@ -180,11 +180,8 @@ async def amain(args: argparse.Namespace) -> int:
     fillers = [] if args.mute_fillers else list(persona.fillers)
     tool_hints = [h for h in (getattr(persona, "tool_hints", None) or []) if isinstance(h, str)]
 
-    t0 = time.perf_counter()
-    with console.status("warming up stt / llm / tts..."):
-        await asyncio.gather(stt.warmup(), llm.warmup(), tts.warmup())
-    console.print(f"[dim]warm in {time.perf_counter() - t0:.2f}s: {stt.name} + {llm.name} + {tts.name}[/]")
-
+    # Open the audio devices BEFORE any network warmup: a missing/denied microphone
+    # should fail fast without spending API calls or leaving warmup tasks dangling.
     from eva.audio.player import Player
 
     player = Player(tts.sample_rate, device=settings.output_device)
@@ -197,9 +194,26 @@ async def amain(args: argparse.Namespace) -> int:
         from eva.audio.vad import UtteranceSegmenter
 
         mic = Mic(device=settings.input_device)
-        mic.start()
+        try:
+            mic.start()
+        except Exception as e:
+            player.close()
+            console.print(f"[red]{e}[/]")
+            return 2
         frames = mic.frames()
         segmenter = UtteranceSegmenter(settings)
+
+    t0 = time.perf_counter()
+    try:
+        with console.status("warming up stt / llm / tts..."):
+            await asyncio.gather(stt.warmup(), llm.warmup(), tts.warmup())
+    except BaseException:
+        if mic is not None:
+            mic.stop()
+        player.close()
+        await asyncio.gather(stt.close(), llm.close(), tts.close(), return_exceptions=True)
+        raise
+    console.print(f"[dim]warm in {time.perf_counter() - t0:.2f}s: {stt.name} + {llm.name} + {tts.name}[/]")
 
     agent = VoiceAgent(
         stt,

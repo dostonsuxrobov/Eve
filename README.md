@@ -30,9 +30,14 @@ you want `disable_reasoning` (0.14 s faster to first content, but see "Known iss
 ## Setup
 
 ```
-uv venv .venv --python 3.13          # or python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt
+uv python install 3.13                                   # a uv-managed CPython, see note below
+uv venv .venv --python cpython-3.13.15-windows-x86_64-none
+uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 ```
+
+Do not build the venv on the Microsoft Store Python (the `python` that lives under
+`AppData\Local\Microsoft\WindowsApps`). Windows denies audio capture to that packaged app, so
+the mic fails with `PortAudioError ... [MME error 1]`. A python.org or uv-managed CPython works.
 
 Keys: put them in `cerebras_api_key.txt` and `elevenlabs_key.txt` in the repo root (both
 gitignored) or export `CEREBRAS_API_KEY` / `ELEVENLABS_API_KEY`. The ElevenLabs key needs
