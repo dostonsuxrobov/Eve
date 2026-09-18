@@ -29,6 +29,15 @@ def build_stt(cfg: dict[str, Any], keys: Keys) -> STT:
             model_id=cfg.get("model_id", "scribe_v1"),
             language=cfg.get("language"),
         )
+    if kind == "elevenlabs-realtime":
+        from .stt.elevenlabs_realtime import ElevenLabsRealtimeSTT
+
+        assert keys.elevenlabs, "ElevenLabs key missing"
+        return ElevenLabsRealtimeSTT(
+            api_key=keys.elevenlabs,
+            model_id=cfg.get("model_id", "scribe_v2_realtime"),
+            language=cfg.get("language"),
+        )
     if kind == "faster-whisper":
         from .stt.faster_whisper_local import FasterWhisperSTT
 
@@ -40,7 +49,11 @@ def build_stt(cfg: dict[str, Any], keys: Keys) -> STT:
     if kind == "parakeet":
         from .stt.sherpa_parakeet import SherpaParakeetSTT
 
-        return SherpaParakeetSTT(model_dir=cfg.get("model_dir"))
+        return SherpaParakeetSTT(
+            model_dir=cfg.get("model_dir"),
+            num_threads=cfg.get("num_threads", 4),
+            min_audio_s=cfg.get("min_audio_s", 1.5),
+        )
     raise ValueError(f"unknown stt kind {kind!r}")
 
 
@@ -114,5 +127,11 @@ def build_tts(cfg: dict[str, Any], keys: Keys) -> TTS:
     if kind == "kokoro":
         from .tts.kokoro_local import KokoroTTS
 
-        return KokoroTTS(voice=cfg.get("voice", "af_heart"), speed=cfg.get("speed", 1.0))
+        return KokoroTTS(
+            voice=cfg.get("voice", "af_heart"),
+            speed=cfg.get("speed", 1.0),
+            model=cfg.get("model", "fp32"),
+            intra_threads=cfg.get("intra_threads"),
+            lang=cfg.get("lang", "en-us"),
+        )
     raise ValueError(f"unknown tts kind {kind!r}")

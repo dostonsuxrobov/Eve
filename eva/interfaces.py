@@ -41,6 +41,26 @@ class STT(Protocol):
     async def close(self) -> None: ...
 
 
+@runtime_checkable
+class StreamingSTT(STT, Protocol):
+    """Optional low-latency extension: audio is streamed *while* the user speaks.
+
+    The pipeline detects support with ``isinstance(stt, StreamingSTT)`` and then
+    calls ``feed(frame)`` for every mic frame from speech onset (including the
+    pre-speech buffer) and ``commit()`` at the VAD endpoint; ``commit()`` returns
+    the transcript of everything fed since the previous commit.  ``discard()``
+    abandons the audio fed so far (a blip that was not a turn, or a commit that a
+    barge-in cancelled; ``keep_audio=True`` keeps the client copy for re-sending).
+    ``transcribe()`` must keep working for utterances that were not streamed.
+    """
+
+    async def feed(self, pcm: np.ndarray) -> None: ...
+
+    async def commit(self) -> Transcript: ...
+
+    async def discard(self, keep_audio: bool = False) -> None: ...
+
+
 # --------------------------------------------------------------------------- LLM
 @dataclass
 class LLMDelta:
@@ -56,6 +76,14 @@ class LLMToolCall:
 
 @dataclass
 class LLMDone:
+    """End of one assistant turn.
+
+    ``finish_reason`` is the backend's (``stop`` / ``tool_calls`` / ``length``) or
+    ``"error"`` when the stream broke after events were already yielded (the error
+    text is then in ``usage["error"]``).  ``usage`` may carry backend-specific keys
+    (Cerebras ``time_info``, reasoning counters ...).
+    """
+
     finish_reason: str
     ttft_s: float | None
     total_s: float
@@ -82,9 +110,17 @@ class LLM(Protocol):
 
         `messages` is OpenAI chat format. Tool results are appended by the caller as
         {"role": "tool", "tool_call_id": ..., "content": ...} messages.
+
+        If the request cannot be started at all the implementation raises; once the
+        first event has been yielded it never raises and ends with
+        ``LLMDone(finish_reason="error")`` instead.
         """
 
     async def close(self) -> None: ...
+
+    # Optional (not required by the Protocol): ``async def complete(messages, **kw) -> str``
+    # for non-streaming helpers such as the memory summariser, which feature-detects it
+    # and otherwise drains ``stream()``.
 
 
 # --------------------------------------------------------------------------- TTS

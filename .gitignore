@@ -8,6 +8,7 @@ models/
 samples/out/
 bench/out/
 memory.json
+notes.json
 *.wav
 *.mp3
 !samples/*.wav

@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = ROOT / "models"
 SAMPLES_DIR = ROOT / "samples"
 MEMORY_FILE = ROOT / "memory.json"
+NOTES_FILE = ROOT / "notes.json"  # eva.tools remember_note / recall_notes
 
 # Cerebras sits behind Cloudflare and returns 403 (error 1010) for the default
 # python-urllib / python-httpx user agents. Always send this.
@@ -28,8 +29,8 @@ EL_VOICES: dict[str, str] = {
     "charlotte": "XB0fDUnXU5powFXDhCwa",
     "alice": "Xb7hH8MSUJpSbSDYk0k2",
     "matilda": "XrExE9yKIg1WjnnlVkGX",
-    "jessica": "cgSgspJ2msm6clMXDiKS",
     "lily": "pFZP5JQG7iQjIQuC4Bku",
+    # "jessica" (cgSgspJ2msm6clMXDiKS) returns 404 voice_not_found on this key; removed.
 }
 
 
@@ -89,43 +90,43 @@ class Preset:
 PRESETS: dict[str, Preset] = {
     "cloud-fast": Preset(
         name="cloud-fast",
-        description="ElevenLabs Scribe STT + Cerebras qwen-3.8-27b (no reasoning) + ElevenLabs Flash. Lowest cloud latency.",
-        stt={"kind": "elevenlabs", "model_id": "scribe_v1"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "none"},
-        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "ws"},
+        description="ElevenLabs Scribe realtime STT + Cerebras qwen-3.8-27b (low reasoning) + ElevenLabs Flash. Lowest cloud latency.",
+        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
+        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low"},
+        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
     ),
     "cloud-smart": Preset(
         name="cloud-smart",
         description="Same audio stack, Cerebras gpt-oss-120b with low reasoning. Smarter, a bit slower.",
-        stt={"kind": "elevenlabs", "model_id": "scribe_v1"},
+        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
         llm={"kind": "cerebras", "model": "gpt-oss-120b", "reasoning": "low"},
-        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "ws"},
+        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
     ),
     "expressive": Preset(
         name="expressive",
         description="Cerebras qwen + ElevenLabs v3 with audio tags ([laughs], [sighs]). Most emotional, highest TTS latency.",
-        stt={"kind": "elevenlabs", "model_id": "scribe_v1"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "none"},
+        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
+        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low"},
         tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_v3", "mode": "http"},
     ),
     "local-brain": Preset(
         name="local-brain",
-        description="Cloud audio, local Ollama qwen3:4b brain. Tests how far a small local model gets.",
-        stt={"kind": "elevenlabs", "model_id": "scribe_v1"},
+        description="Cloud audio (batch Scribe v2), local Ollama qwen3:4b brain. Tests how far a small local model gets.",
+        stt={"kind": "elevenlabs", "model_id": "scribe_v2"},
         llm={"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M"},
-        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "ws"},
+        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
     ),
     "local-stt": Preset(
         name="local-stt",
         description="Local faster-whisper STT + Cerebras + ElevenLabs. Removes one network hop.",
-        stt={"kind": "faster-whisper", "model": "base.en"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "none"},
-        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "ws"},
+        stt={"kind": "faster-whisper", "model": "base.en", "device": "cpu"},
+        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low"},
+        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
     ),
     "fully-local": Preset(
         name="fully-local",
         description="Everything on this laptop: faster-whisper + Ollama + Kokoro. Free, private, less natural voice.",
-        stt={"kind": "faster-whisper", "model": "base.en"},
+        stt={"kind": "faster-whisper", "model": "base.en", "device": "cpu"},
         llm={"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M"},
         tts={"kind": "kokoro", "voice": "af_heart"},
     ),
