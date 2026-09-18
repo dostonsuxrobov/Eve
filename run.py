@@ -241,6 +241,10 @@ async def amain(args: argparse.Namespace) -> int:
         except Exception:
             pass
         try:
+            await agent.close()  # stops the LLM keep-alive pings (run() does this itself)
+        except Exception:
+            pass
+        try:
             player.stop()
         except Exception:
             pass

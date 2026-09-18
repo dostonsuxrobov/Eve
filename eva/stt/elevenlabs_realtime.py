@@ -359,6 +359,9 @@ class ElevenLabsRealtimeSTT:
         self._api_lock = asyncio.Lock()
         self.close_wait_s = 1.5  # max wait for a retired socket to close before the next request / socket
         self.last_connect_s: float | None = None
+        # latency of the most recent batch request (incl. the warmup probe): the pipeline
+        # reads it to size the commit deadline, since batch is slow whenever commits are
+        self.last_batch_s: float | None = None
         self.sample_rate = MIC_SAMPLE_RATE
         self._closed_flag = False
 
@@ -619,7 +622,10 @@ class ElevenLabsRealtimeSTT:
         if self._fallback is None:
             self._fallback = ElevenLabsScribeSTT(self.api_key, model_id="scribe_v2", language=self.language)
         await self._await_closing()
-        return await self._fallback.transcribe(pcm, sample_rate or self.sample_rate)
+        t0 = time.perf_counter()
+        tr = await self._fallback.transcribe(pcm, sample_rate or self.sample_rate)
+        self.last_batch_s = time.perf_counter() - t0
+        return tr
 
     # --------------------------------------------------------------- protocol
     async def warmup(self) -> None:

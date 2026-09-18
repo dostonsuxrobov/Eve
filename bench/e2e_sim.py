@@ -6,7 +6,10 @@ Two modes:
     Runs the pipeline against ``eva.mocks`` doubles (no audio device, no network,
     no sibling modules) and asserts the behaviours that matter: metrics on a
     normal 2-turn chat, barge-in truncation + stop latency, tool-call hints,
-    fillers, timer events, typed input and thinking-phase merges.
+    fillers, timer events, typed input, thinking-phase merges, no audio after a
+    barge-in stop, the tool round cap, history validity after a barge-in during a
+    tool, the speech-time barge-in filter, the adaptive commit deadline and the
+    LLM keep-alive.
 
 real mode (default)
     Builds the preset's real STT/LLM/TTS via ``eva.factory``, the real Silero
@@ -657,6 +660,265 @@ async def test_commit_deadline(verbose: bool) -> tuple[Check, dict[str, Any]]:
     return c, {"turns": _turn_rows(turns), "calls": stt.calls, "discards": stt.discards, "commit_cancelled": stt.commit_cancelled}
 
 
+async def test_no_audio_after_stop(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(n) a writer wake-up that is already in the event loop's ready queue when the
+    barge-in stops the player must not write audio after player.stop(): Eva must not
+    keep talking over the user.  The race is forced deterministically: the TTS sets an
+    event right before yielding a chunk, so the interrupter and the pipeline writer
+    (woken by that chunk) run in the same loop iteration, interrupter first."""
+    c = Check()
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    long_reply = (
+        "So here is the thing about today, and I want to tell it properly because it matters. "
+        "I was thinking about what you said yesterday and honestly it stuck with me for a while, "
+        "long enough that I went back over the whole conversation twice. Anyway, tell me what you think."
+    )
+    llm = MockLLM([long_reply, "Okay, go on."], ttft_s=0.1, token_delay_s=0.02)
+    go = asyncio.Event()
+
+    class RacingTTS(MockTTS):
+        async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+            i = 0
+            async for b in super().synthesize(text):
+                i += 1
+                if i == 4 and not go.is_set():
+                    go.set()  # the interrupter's wake-up is queued now, the writer's right after
+                yield b
+
+    tts = RacingTTS(ttfa_s=0.1, realtime_factor=0.3, chunk_ms=100)
+    agent = _mock_agent(
+        stt=MockSTT([]), llm=llm, tts=tts, player=player, segmenter=None, frames=None,
+        settings=_settings(filler_after_ms=0), log=log,
+    )
+
+    async def interrupter() -> None:
+        await go.wait()
+        await agent.interrupt("test")
+        c.ok(not player.is_active, "player still active when interrupt() returned")
+
+    itask = asyncio.create_task(interrupter())
+    m1 = await agent.say("tell me a long story")
+    await itask
+    c.ok(go.is_set(), "the race was never armed (TTS produced fewer than 4 chunks)")
+    c.ok(m1.interrupted, "turn was not interrupted")
+    c.ok(len(player.stop_calls) >= 2, f"expected stop() before and after the task ended, got {len(player.stop_calls)} calls")
+    if player.stop_calls:
+        t_stop = player.stop_calls[0][0]
+        late = [w for w in player.writes if w[0] > t_stop]
+        c.ok(not late, f"{len(late)} write(s) reached the player after stop(): {[round(w[2] / 24_000, 3) for w in late]} s")
+        c.note(f"{len(player.writes)} writes before stop, {len(late)} after")
+    c.ok(not player.is_active, "player active after the interrupted turn")
+    stored = [x for x in agent.messages if x["role"] == "assistant"]
+    c.ok(len(stored) == 1 and stored[0]["content"].endswith(INTERRUPTED_MARK), f"history after interrupt: {stored}")
+    m2 = await agent.say("okay")
+    c.ok(m2.assistant_text == "Okay, go on." and not m2.interrupted, f"next turn wrong: {m2.assistant_text!r}")
+    leaked = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and t.get_name().startswith("eva-") and t.get_name() != "eva-keepalive"]
+    c.ok(not leaked, f"leaked tasks: {[t.get_name() for t in leaked]}")
+    return c, {"turns": _turn_rows([m1, m2]), "writes": len(player.writes), "stop_calls": len(player.stop_calls)}
+
+
+async def test_tool_round_cap(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(o) a model that answers every tool result with another tool call is stopped at
+    MAX_TOOL_ROUNDS: the extra call is dropped, not executed, and the turn ends."""
+    import eva.pipeline as pl
+
+    c = Check()
+    calls: list[dict[str, Any]] = []
+
+    async def set_timer(minutes: int, label: str = "timer") -> str:
+        calls.append({"minutes": minutes, "label": label})
+        return f"Timer '{label}' set for {minutes} minutes."
+
+    tools = [
+        Tool(
+            name="set_timer",
+            description="Set a countdown timer.",
+            parameters={"type": "object", "properties": {"minutes": {"type": "integer"}, "label": {"type": "string"}}, "required": ["minutes"]},
+            fn=set_timer,
+            spoken_hint="One sec.",
+        )
+    ]
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    llm = MockLLM([ScriptedToolCall("set_timer", {"minutes": 5, "label": "tea"}, id=f"call_{i}") for i in range(8)], ttft_s=0.05)
+    agent = _mock_agent(
+        stt=MockSTT([]), llm=llm, tts=MockTTS(ttfa_s=0.05), player=player, segmenter=None, frames=None,
+        settings=_settings(filler_after_ms=0), log=log, tools=tools,
+    )
+    m = await asyncio.wait_for(agent.say("set a tea timer"), timeout=20)
+    c.ok(len(llm.calls) == pl.MAX_TOOL_ROUNDS + 1, f"expected {pl.MAX_TOOL_ROUNDS + 1} LLM rounds, got {len(llm.calls)}")
+    c.ok(len(calls) == pl.MAX_TOOL_ROUNDS, f"tool executed {len(calls)}x, expected {pl.MAX_TOOL_ROUNDS}")
+    dropped = log.first("tool_calls_dropped")
+    c.ok(dropped is not None and dropped[1]["names"] == ["set_timer"], f"the extra call was not dropped: {dropped}")
+    c.ok(m.assistant_text.endswith("Timer 'tea' set for 5 minutes."), f"the last tool result should be spoken: {m.assistant_text!r}")
+    roles = [x["role"] for x in agent.messages]
+    c.ok(roles == ["user"] + ["assistant", "tool"] * pl.MAX_TOOL_ROUNDS + ["assistant"], f"history roles {roles}")
+    return c, {"turns": _turn_rows([m]), "llm_calls": len(llm.calls), "tool_calls": len(calls)}
+
+
+async def test_barge_in_during_tool(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(p) a barge-in while a tool is executing: the assistant tool_calls message already
+    in the history gets a synthetic tool result for every call id before the
+    [interrupted] message, so the next LLM request is a valid chat sequence."""
+    c = Check()
+    finished: list[float] = []
+
+    async def slow_tool(city: str = "here") -> str:
+        await asyncio.sleep(1.5)
+        finished.append(time.perf_counter())
+        return f"Weather in {city}: 19 C, clear."
+
+    tools = [
+        Tool(
+            name="get_weather",
+            description="Weather now.",
+            parameters={"type": "object", "properties": {"city": {"type": "string"}}, "required": []},
+            fn=slow_tool,
+            spoken_hint="Let me check the weather.",
+        )
+    ]
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    stt = MockSTT(["What is the weather like?", "Actually never mind."], delay_s=0.2)
+    llm = MockLLM([ScriptedToolCall("get_weather", {"city": "Lisbon"}, id="call_w1"), "Sure, no problem."], ttft_s=0.2)
+    tts = MockTTS(ttfa_s=0.1)
+    seg = ScriptedSegmenter(script=[(0.3, 1.0)])
+    settings = _settings(filler_after_ms=0, barge_in_min_speech_ms=300)
+
+    def hook(name: str, data: dict[str, Any]) -> None:
+        if name == "tool_call":  # the user talks over the hint, 0.2 s into the 1.5 s tool
+            seg.schedule(time.perf_counter() + 0.2, 1.0)
+
+    log.hooks.append(hook)
+    agent = _mock_agent(
+        stt=stt, llm=llm, tts=tts, player=player, segmenter=seg, frames=silent_frames(20), settings=settings,
+        log=log, tools=tools, max_turns=2,
+    )
+    turns = await agent.run()
+    c.ok(len(turns) == 2, f"expected 2 turns, got {len(turns)}")
+    c.ok(bool(turns) and turns[0].interrupted, "first turn not interrupted")
+    c.ok(not finished, "the tool ran to completion although the turn was cancelled")
+    roles = [x["role"] for x in agent.messages]
+    c.ok(roles == ["user", "assistant", "tool", "assistant", "user", "assistant"], f"history roles {roles}")
+    # every tool_call_id is answered by the tool messages that immediately follow
+    for i, msg in enumerate(agent.messages):
+        for tc in msg.get("tool_calls") or []:
+            following = [x for x in agent.messages[i + 1 :] if x["role"] == "tool"]
+            c.ok(any(x.get("tool_call_id") == tc["id"] for x in following), f"tool call {tc['id']} has no tool result")
+            nxt = agent.messages[i + 1] if i + 1 < len(agent.messages) else {}
+            c.ok(nxt.get("role") == "tool", f"message after tool_calls is {nxt.get('role')!r}, not 'tool'")
+    tool_msgs = [x for x in agent.messages if x["role"] == "tool"]
+    c.ok(bool(tool_msgs) and "cancelled" in tool_msgs[0]["content"], f"synthetic result missing: {tool_msgs}")
+    if len(llm.calls) >= 2:
+        sent = [x["role"] for x in llm.calls[1]]
+        c.ok(sent[1:] == ["user", "assistant", "tool", "assistant", "user"], f"second LLM request roles {sent}")
+    c.ok(len(turns) == 2 and turns[1].assistant_text == "Sure, no problem.", "second turn wrong")
+    return c, {"turns": _turn_rows(turns), "history_roles": roles}
+
+
+async def test_blip_with_padding_ignored(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(q) the real segmenter's SpeechEnd carries ~0.45 s of pre-speech ring + tail around
+    even a 0.1 s blip; the barge-in filter must look at the speech time, not the
+    utterance length, or every cough stops her at the endpoint."""
+    c = Check()
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    reply = "Let me tell you about my day, it was long but honestly pretty good in the end, all things considered."
+    stt = MockSTT(["How was your day?"], delay_s=0.2)
+    llm = MockLLM([reply], ttft_s=0.2)
+    seg = ScriptedSegmenter(script=[(0.3, 1.0)], pad_s=0.45)  # every utterance is padded like UtteranceSegmenter's
+    settings = _settings(filler_after_ms=0, barge_in_min_speech_ms=300)
+
+    def hook(name: str, data: dict[str, Any]) -> None:
+        if name == "audio_start" and len(log.all("speech_start")) == 1:
+            seg.schedule(time.perf_counter() + 0.2, 0.1)  # a 0.1 s cough while Eva speaks
+
+    log.hooks.append(hook)
+    agent = _mock_agent(
+        stt=stt, llm=llm, tts=MockTTS(ttfa_s=0.1), player=player, segmenter=seg, frames=silent_frames(20), settings=settings,
+        log=log, max_turns=1,
+    )
+    turns = await agent.run()
+    c.ok(len(turns) == 1, f"expected 1 turn, got {len(turns)}")
+    ends = log.all("speech_end")
+    c.ok(len(ends) == 2 and abs(ends[1][1]["duration_s"] - 0.55) < 0.02, f"blip SpeechEnd should report ~0.55 s of audio: {ends}")
+    ig = log.first("barge_in_ignored")
+    c.ok(ig is not None and ig[1].get("speech_ms") == 100.0, f"the padded 0.1 s blip was not ignored: {ig}")
+    c.ok(not log.all("barge_in"), "the cough interrupted her")
+    c.ok(bool(turns) and not turns[0].interrupted and turns[0].assistant_text == reply, "reply was cut")
+    return c, {"turns": _turn_rows(turns)}
+
+
+async def test_adaptive_commit_deadline(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(r) when the batch endpoint is known to be slow (the STT's warmup probe / last batch
+    request) a late commit is NOT cancelled at the base deadline: the deadline grows to
+    STT_COMMIT_DEADLINE_FACTOR x that latency, so the turn waits for the commit instead
+    of paying the deadline plus a slow batch request."""
+    import eva.pipeline as pl
+
+    c = Check()
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    stt = MockStreamingSTT(["Hey Eva, quick one."], delay_s=1.5, commit_delay_s=1.0)
+    stt.last_batch_s = 0.9  # what a slow warmup probe would have measured
+    llm = MockLLM(["Sure, go ahead."], ttft_s=0.3)
+    seg = ScriptedSegmenter(script=[(0.3, 1.0)])
+    old = pl.STT_COMMIT_DEADLINE_S
+    pl.STT_COMMIT_DEADLINE_S = 0.4  # the base deadline alone would cancel this 1.0 s commit
+    try:
+        agent = _mock_agent(
+            stt=stt, llm=llm, tts=MockTTS(), player=player, segmenter=seg, frames=silent_frames(10),
+            settings=_settings(filler_after_ms=0), log=log, max_turns=1,
+        )
+        c.ok(abs(agent._commit_deadline() - 0.9 * pl.STT_COMMIT_DEADLINE_FACTOR) < 1e-9, f"deadline {agent._commit_deadline()} != factor x last batch")
+        turns = await agent.run()
+    finally:
+        pl.STT_COMMIT_DEADLINE_S = old
+    c.ok(len(turns) == 1, f"expected 1 turn, got {len(turns)}")
+    c.ok(log.first("stt_commit_timeout") is None, "the commit was cancelled although batch is known to be slow")
+    c.ok(len(stt.commits) == 1 and len(stt.calls) == 0, f"commits {len(stt.commits)}, batch calls {len(stt.calls)} (expected 1 / 0)")
+    if turns:
+        b = turns[0].breakdown()
+        c.ok(b["stt"] is not None and 0.95 <= b["stt"] <= 1.3, f"stt stage {b['stt']} should be the 1.0 s commit, not deadline + 1.5 s batch")
+    c.ok(agent.stream_turns == 1, f"stream_turns {agent.stream_turns}")
+    c.ok(agent._stt_recent_s.get("commit") is not None and agent._commit_deadline() >= 2 * 0.9, "recent commit latency not tracked")
+    return c, {"turns": _turn_rows(turns), "commits": stt.commits}
+
+
+async def test_llm_keepalive(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(s) an LLM with ping() is pinged after LLM_KEEPALIVE_S of idleness, never while a
+    response is in flight, and the keep-alive task is closed with the agent."""
+    import eva.pipeline as pl
+
+    c = Check()
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    llm = MockLLM(["Hi there."], ttft_s=0.2)
+    llm.pingable = True
+    seg = ScriptedSegmenter(script=[(0.6, 0.5)])
+    old = pl.LLM_KEEPALIVE_S
+    pl.LLM_KEEPALIVE_S = 0.3
+    try:
+        agent = _mock_agent(
+            stt=MockSTT(["hi"], delay_s=0.2), llm=llm, tts=MockTTS(ttfa_s=0.1), player=player, segmenter=seg,
+            frames=silent_frames(3.0), settings=_settings(filler_after_ms=0), log=log,
+        )
+        turns = await agent.run()
+    finally:
+        pl.LLM_KEEPALIVE_S = old
+    c.ok(len(turns) == 1, f"expected 1 turn, got {len(turns)}")
+    c.ok(len(llm.pings) >= 2, f"expected pings while idle, got {len(llm.pings)}")
+    n_ev = len(log.all("llm_ping"))
+    c.ok(len(llm.pings) - 1 <= n_ev <= len(llm.pings), f"{n_ev} llm_ping events for {len(llm.pings)} pings (at most one may be cut off by the shutdown)")
+    if turns:
+        t = turns[0]
+        busy = [p for p in llm.pings if t.speech_end is not None and t.audio_finished is not None and t.speech_end <= p <= t.audio_finished]
+        c.ok(not busy, f"{len(busy)} ping(s) while a response was in flight")
+    c.ok(agent._keepalive_task is None, "keep-alive task not closed by run()")
+    return c, {"turns": _turn_rows(turns), "pings": len(llm.pings)}
+
+
 MOCK_TESTS = [
     ("a_normal_two_turns", test_normal_two_turns),
     ("b_barge_in", test_barge_in),
@@ -671,6 +933,12 @@ MOCK_TESTS = [
     ("k_empty_reply", test_empty_reply),
     ("l_llm_failure", test_llm_failure),
     ("m_commit_deadline", test_commit_deadline),
+    ("n_no_audio_after_stop", test_no_audio_after_stop),
+    ("o_tool_round_cap", test_tool_round_cap),
+    ("p_barge_in_during_tool", test_barge_in_during_tool),
+    ("q_blip_with_padding_ignored", test_blip_with_padding_ignored),
+    ("r_adaptive_commit_deadline", test_adaptive_commit_deadline),
+    ("s_llm_keepalive", test_llm_keepalive),
 ]
 
 

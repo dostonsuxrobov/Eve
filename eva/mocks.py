@@ -38,6 +38,7 @@ except Exception:  # pragma: no cover - sibling not built yet
         t: float
         pcm: np.ndarray
         duration_s: float
+        speech_ms: float = 0.0
 
 
 # --------------------------------------------------------------------------- STT
@@ -65,7 +66,10 @@ class MockSTT:
         text = self._texts[self._i] if self._i < len(self._texts) else ""
         self._i += 1
         self.calls.append({"samples": int(len(pcm)), "text": text, "t": t0})
-        return Transcript(text=text, latency_s=time.perf_counter() - t0, meta={"mock": True})
+        latency = time.perf_counter() - t0
+        if hasattr(self, "last_batch_s"):
+            self.last_batch_s = latency
+        return Transcript(text=text, latency_s=latency, meta={"mock": True})
 
     async def close(self) -> None:
         return None
@@ -90,6 +94,7 @@ class MockStreamingSTT(MockSTT):
         self.commits: list[dict[str, Any]] = []
         self.discards: list[dict[str, Any]] = []
         self.commit_cancelled: list[float] = []  # perf_counter of each commit() cancelled mid-flight
+        self.last_batch_s: float | None = None  # latency of the last batch request (incl. a warmup probe), like the real STT
 
     async def feed(self, pcm: np.ndarray) -> None:
         self.feeds += 1
@@ -154,6 +159,20 @@ class MockLLM:
         self.ttft_s = ttft_s
         self.token_delay_s = token_delay_s
         self.calls: list[list[dict[str, Any]]] = []
+        self.pings: list[float] = []  # perf_counter of every ping() (only if ``pingable``)
+        self.pingable = False  # set True to expose ping() like OpenAICompatLLM
+        self.ping_delay_s = 0.05
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "ping" and self.__dict__.get("pingable"):
+            return self._ping
+        raise AttributeError(name)
+
+    async def _ping(self) -> float:
+        t0 = time.perf_counter()
+        self.pings.append(t0)
+        await asyncio.sleep(self.ping_delay_s)
+        return time.perf_counter() - t0
 
     async def warmup(self) -> None:
         return None
@@ -330,6 +349,9 @@ class ScriptedSegmenter:
     ``script`` is a list of ``(start_offset_s, duration_s)`` relative to the first
     ``feed()`` call; ``schedule()`` adds utterances at absolute ``perf_counter``
     times while running (used to place a barge-in relative to agent audio).
+    ``pad_s`` is added to every emitted utterance's audio / ``duration_s`` (the real
+    segmenter's pre-speech ring buffer + tail) while ``speech_ms`` stays the
+    scripted speech length, as ``UtteranceSegmenter`` reports it.
     """
 
     def __init__(
@@ -337,10 +359,12 @@ class ScriptedSegmenter:
         script: list[tuple[float, float]] | None = None,
         sample_rate: int = MIC_SAMPLE_RATE,
         threshold: float = 0.5,
+        pad_s: float = 0.0,
     ) -> None:
         self._script = list(script or [])
         self.sample_rate = sample_rate
         self.threshold = threshold
+        self.pad_s = pad_s
         self.last_prob = 0.0
         self.speaking = False
         self._t0: float | None = None
@@ -375,8 +399,11 @@ class ScriptedSegmenter:
             if now >= self._speech_start_t + self._speech_duration:
                 self.speaking = False
                 self.last_prob = 0.05
-                n = int(self._speech_duration * self.sample_rate)
-                events.append(SpeechEnd(t=now, pcm=np.zeros(n, dtype=np.int16), duration_s=self._speech_duration))
+                total = self._speech_duration + self.pad_s
+                n = int(total * self.sample_rate)
+                events.append(
+                    SpeechEnd(t=now, pcm=np.zeros(n, dtype=np.int16), duration_s=total, speech_ms=self._speech_duration * 1000.0)
+                )
         elif self._pending and now >= self._pending[0][0]:
             _, dur = self._pending.pop(0)
             self.speaking = True

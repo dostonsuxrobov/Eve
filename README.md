@@ -1,9 +1,10 @@
 # Eva
 
 Eva is a personal voice agent in the spirit of Sesame's Maya: you talk, she listens while you
-speak, answers in under a second on the fast cloud path, can be interrupted mid-sentence, hums
-"mm, hang on" when a reply is slow, and can do a few small things (timers, notes, weather, open a
-URL). She is one asyncio pipeline (`VAD -> STT -> LLM -> sentence chunker -> TTS -> player`) with
+speak, answers about a second after the endpoint fires on the fast cloud path (1.0 s median from
+endpoint detection, 1.65 s from your last word, with ElevenLabs STT in its fast state; see
+"Measured latency"), can be interrupted mid-sentence, hums "mm, hang on" when a reply is slow, and
+can do a few small things (timers, notes, weather, open a URL). She is one asyncio pipeline (`VAD -> STT -> LLM -> sentence chunker -> TTS -> player`) with
 swappable providers, so seven "presets" can be compared head to head on the same code. Built and
 measured on one Windows 11 laptop (RTX 4050 6 GB, Python 3.13). Not built for scale.
 
@@ -68,7 +69,7 @@ into `memory.json`, then everything is closed. Set `PYTHONIOENCODING=utf-8` on a
 Bench and simulation (no microphone needed):
 
 ```
-.venv/Scripts/python.exe bench/e2e_sim.py --mock                      # 13 pipeline tests on mocks, no network
+.venv/Scripts/python.exe bench/e2e_sim.py --mock                      # 19 pipeline tests on mocks, no network
 .venv/Scripts/python.exe bench/e2e_sim.py --preset cloud-fast --silent # the three sample utterances end to end
 .venv/Scripts/python.exe bench/summarize_e2e.py                        # the latency table below
 ```
@@ -82,6 +83,15 @@ three to six TTS requests.
 ## Measured latency
 
 Response latency is the number that matters: the user stops talking to the first agent audio.
+The pipeline can only measure it from the moment the segmenter detects the endpoint, and that
+moment is 0.6 s after the last word: 550 ms of endpoint silence is 18 VAD windows of 32 ms
+(576 ms) plus the frame granularity, measured at 0.60-0.64 s (median 0.62 s) from the end of
+speech in the sample wavs on every turn of the runs below. **Add 0.62 s to every response figure
+in this table to get last-word-to-first-audio**: on `cloud-fast` that is 1.65 s median over the
+nine turns of runs 1-3 (1.36-3.00 s). `DESIGN.md` budgets 900 ms for speech-end to first audio
+with the endpoint silence inside the budget; the best measured runs miss that target by about
+0.7 s, and the endpoint silence alone is two thirds of the budget.
+
 Medians over the non-interrupted turns of the recorded runs (`cloud-fast` over three runs of the
 three utterances, the others over one run each); every figure is measured, from
 `bench/summarize_e2e.py`:
@@ -104,6 +114,16 @@ presets are bounded by the local LLM (1.1-1.4 s TTFT for the first sentence, 0.3
 history is warm) and Kokoro's 0.3-0.55 s first-audio time. The endpoint silence (550 ms) is on
 top of all of these and is the same for every preset.
 
+The ElevenLabs rows are the account's *fast* STT state (all recorded between 20:36 and 21:00).
+They are not reproducible while the account is in the slow state described under "Known issues"
+(continuously since about 21:01 that evening): a `local-brain` rerun at 21:53
+(`bench/out/verify_local_task/e2e_local-brain.json`) measured batch Scribe at 2.68 / 5.43 / 4.63 s
+for 3 / 8 / 4.4 s of audio (4.53 / 6.06 / 6.35 s response, LLM and TTS unchanged), with nothing
+else on the account for the first two turns; a `cloud-fast` run at 22:36 with the adaptive
+commit deadline (`bench/out/fix_cloud-fast.json`) got 2.47 / 0.71 / 1.89 s (STT 1.59 / 0.21 /
+1.21 s, no batch fallback) while a standalone batch probe took 3.0 s for 2.8 s of audio. The two
+fully offline presets reproduced within 0.1 s the same evening.
+
 Other cloud-fast measurements from the same files: the ElevenLabs stream-input websocket was not
 faster than per-sentence HTTP streaming here (1.39 vs 0.88 s median, so HTTP is the default); a run
 on the real speakers matched the silent runs (0.94 s); the original batch Scribe v1 configuration
@@ -112,13 +132,22 @@ was 2.02 s (STT 1.38 s), which is why the realtime websocket is used.
 ## Turn-taking: barge-in, fillers, echo guard
 
 **Barge-in.** A speech onset while Eva is thinking or speaking is a candidate. It is confirmed
-after 300 ms of continuous speech (a cough or a "mm" never stops her). On confirmation the player
+after 300 ms of speech-positive VAD windows (a cough or a "mm" never stops her). The count is the
+segmenter's speech time both while you are still talking and when the blip ended before it
+reached 300 ms: the utterance *length* is not usable for that because every utterance carries the
+300 ms pre-speech buffer and a 150 ms tail (a 288 ms cough arrives as a 0.72 s utterance; before
+this check every confirmed blip interrupted her at its endpoint). On confirmation the player
 stops within one output block (measured 0.02 ms for the stop call, 20 ms from confirmation to
-silence), the response task is cancelled (LLM stream, TTS requests, filler timer), and the number
-of samples actually played is mapped onto the per-sentence sample counts so only the words you
-heard go into the history, followed by `[interrupted]` (e.g. `"Hey, Sam. Not bad, just [interrupted]"`).
-If nothing had been heard yet, the interrupted question is taken back and merged with what you
-say next, so "Hey Eva ... how's it going" becomes one turn instead of two.
+silence), the response task is cancelled (LLM stream, TTS requests, filler timer) and awaited,
+then the player is stopped once more so a writer or filler that was already scheduled in the same
+event-loop iteration can never leave audio behind, and the number of samples actually played is
+mapped onto the per-sentence sample counts so only the words you heard go into the history,
+followed by `[interrupted]` (e.g. `"Hey, Sam. Not bad, just [interrupted]"`). If nothing had been
+heard yet, the interrupted question is taken back and merged with what you say next, so "Hey Eva
+... how's it going" becomes one turn instead of two. A barge-in while a tool is still running
+answers the pending tool call with a synthetic `cancelled` result before the `[interrupted]`
+message, so the history stays a valid chat sequence. A reply uses at most three tool rounds; a
+model that keeps calling tools after that has the extra call dropped instead of executed.
 
 **Fillers.** Each persona lists a few backchannels ("mm", "hmm", "okay, so", "mm, hang on"). They are
 pre-synthesized once at startup in the active voice, and one is played only if no real audio has
@@ -138,6 +167,11 @@ every 20 ms microphone frame is sent to the websocket from speech onset (plus a 
 ring buffer), so at the endpoint a `commit` returns the text in 0.15-0.4 s instead of the 0.7-1.3 s a
 batch upload needs. The socket is rotated after every commit (the fresh one opens in the background
 while the reply plays) because the server stalls on repeated content within one session.
+
+**LLM keep-alive.** After 15 s without an LLM request (`LLM_KEEPALIVE_S`), while nothing is in
+flight and you are not talking, the pipeline sends `GET /models` on the LLM's pooled connection so
+the next completion never starts on a stale socket; a turn waits for an in-flight ping rather
+than opening a second, cold connection. See the Cerebras TTFT item under "Known issues".
 
 ## Conversation quality: the eval verdict
 
@@ -170,7 +204,11 @@ Every exchange resends the system prompt (persona + tool notes + memory facts, a
 after the persona rewrite) plus the whole history, so the LLM cost is dominated by prompt tokens.
 Measured on Cerebras (`usage` from the recorded `cloud-fast` runs): 2,770-2,900 total tokens for
 a normal exchange (2,700-2,850 prompt + 30-150 completion, of which 13-110 are reasoning tokens),
-and about 5,900 for the timer exchange, which is two rounds (tool call + result). Before the
+and about 5,900 for the timer exchange, which is two rounds (tool call + result); the run after the
+fixes below measured 2,795 / 2,879 / 5,973. So 5.9 M tokens is roughly 2,000 fresh exchanges, or
+1,400-1,500 in long sessions once the 30-message history cap is reached (about 3,850-4,300 tokens
+per exchange then), i.e. about five to eight hours of back-and-forth at the sample cadence of
+12-15 s per exchange. The keep-alive pings are `GET /models` requests and cost no tokens. Before the
 persona rewrite the same exchanges cost 1,300-2,500 tokens. The prompt grew by 60-130 tokens per
 exchange in those runs; the history is capped at 30 messages, so it stops growing after fifteen
 exchanges. Cerebras reports 2,048 of the prompt tokens as cached from the second round on; they
@@ -186,12 +224,18 @@ Kokoro presets cost nothing.
 * **Never run two ElevenLabs Scribe requests at once.** A batch request sent while a realtime
   commit was still being served made both crawl (4.2 / 31.7 / 7.6 s STT per turn,
   `bench/out/e2e_cloud-fast_race.json`), presumably the account's concurrency limit. The pipeline
-  used to race a batch request against a slow commit; it now waits up to 2.5 s
-  (`STT_COMMIT_DEADLINE_S`), cancels the commit and drops its socket, and only then sends one batch
-  request. `ElevenLabsRealtimeSTT` serializes commits and batch calls with a lock, waits for a
-  retired socket to close before opening the next one or posting a batch request, and warms the
-  batch endpoint before opening the first session. The realtime commit still has a server-side
-  tail of 2-4 s on some turns.
+  used to race a batch request against a slow commit; it now waits for the commit, cancels it and
+  drops its socket, and only then sends one batch request. The wait is `STT_COMMIT_DEADLINE_S`
+  (2.5 s) or `STT_COMMIT_DEADLINE_FACTOR` (2) x the slowest recent Scribe round trip (last
+  commit, last batch request, the warmup probe), whichever is longer: the batch endpoint is slow
+  whenever the commits are, so a fixed 2.5 s deadline made the slow state worse (2.5 + 14.0 s for
+  the 8 s utterance and 2.5 + 5.2 s for the 4.4 s one in `bench/out/verify_cloud_run.json`, while
+  every commit that was allowed to finish in that state returned in 1.6-2.0 s). Cancelling the
+  client side cannot cancel the server's work on the committed segment, so the deadline is the
+  last resort, not the plan. `ElevenLabsRealtimeSTT` serializes commits and batch calls with a
+  lock, waits for a retired socket to close before opening the next one or posting a batch
+  request, and warms the batch endpoint before opening the first session. The realtime commit
+  still has a server-side tail of 2-4 s on some turns.
 * **ElevenLabs STT is sometimes slow for this account regardless of concurrency.** In the
   verification run after the change above (`bench/out/e2e_cloud-fast_run5.json`) the very first
   commit, alone on the account, did not return within 2.5 s; the single sequential batch request
@@ -204,8 +248,16 @@ Kokoro presets cost nothing.
 * `qwen-3.8-27b` with reasoning on occasionally reasons for its whole budget (2/82 turns hit
   `finish=length` with 400 tokens; the presets now allow 800). An empty reply is retried once, then
   once more with a "Mm." prefill, then replaced by a fixed spoken line, so there is no dead air.
-* Cerebras TTFT has a tail: 2.0 and 2.9 s were recorded on single turns in otherwise 0.5 s runs. The
-  filler covers it, but it is audible.
+* Cerebras TTFT has a client-side tail: 2.0, 2.9 and 1.75 s were recorded on single turns in
+  otherwise 0.5 s runs. It is not the model: on every tail turn Cerebras' own `time_info` shows the
+  request processed in 0.13-0.18 s with 0.003 s of queue time, while normal turns carry only
+  0.25-0.35 s of client/network overhead above server time, so the extra 1.5-3 s is spent before
+  the request reaches Cerebras, matching the 0.75-2.2 s cold-connection TTFT in `DESIGN.md`. The
+  pipeline now keeps the pooled connection warm with `GET /models` after 15 s of LLM idleness
+  (`OpenAICompatLLM.ping()` was written for that and had no caller). Whether that removes the
+  tail is not verified: it would take many more Cerebras turns than the quota allows; the one run
+  after the change had TTFT 0.34-0.61 s on its three turns and pings of 0.47-0.75 s. The filler
+  covers a tail when it happens, but it is audible.
 * faster-whisper `base.en` writes "5 minutes" and "mum" for "five minutes" and "mom"; Parakeet is
   more accurate but split "tonight" into "to night" once. Both are CPU-only here.
 * The echo guard is a threshold bump, not echo cancellation: loud speakers can still trigger a false

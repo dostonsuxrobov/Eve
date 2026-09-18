@@ -51,6 +51,11 @@ bench/               latency.py, conversation_eval.py, e2e_sim.py
 * Barge-in: player.stop() must return within one output block (~20–40 ms). The pipeline
   records how many samples were actually played and truncates the assistant transcript
   proportionally, appending " [interrupted]" so the LLM knows what the user heard.
+  The confirmation counts speech-positive VAD windows (`segmenter.speaking_ms` /
+  `SpeechEnd.speech_ms`), never the utterance length (which includes the 300 ms pre-speech
+  ring and a 150 ms tail). The pipeline sets `turn.cancelled` before `stop()`, cancels and
+  awaits the response task, then calls `stop()` again: a writer/filler wake-up that was
+  already scheduled in the same loop iteration cannot leave audio behind.
 
 ## Latency budget (target ≤ 900 ms speech-end -> first agent audio on cloud-fast)
 
@@ -60,6 +65,12 @@ bench/               latency.py, conversation_eval.py, e2e_sim.py
 | STT (Scribe batch on utterance) | 300–500 ms |
 | LLM TTFT (Cerebras qwen, warm) | 300–700 ms |
 | TTS first audio (EL Flash, ws) | 150–300 ms |
+
+Status (measured, README "Measured latency"): not met. The best cloud-fast runs are 1.01 s median
+from the endpoint (STT 0.26 + TTFT 0.54 + TTFA 0.16 + playback), and the endpoint itself fires
+0.62 s after the last word (18 VAD windows of 32 ms), so last word -> first audio is 1.65 s median,
+about 0.7 s over budget. Only smarter turn detection (cutting the 550 ms) or a lower TTFT can close
+that; STT and TTS are already inside their lines when ElevenLabs is in its fast state.
 
 Fillers ("hm", "let me think") are pre-synthesized at startup in the active voice and
 played only if no real audio has started `filler_after_ms` after speech end.

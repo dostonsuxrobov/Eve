@@ -13,14 +13,23 @@ State machine
 Barge-in
 --------
 A ``SpeechStart`` while THINKING/SPEAKING is a *candidate*. It is confirmed once the
-segmenter reports ``barge_in_min_speech_ms`` of continuous speech (a cough never
-stops her). On confirmation: ``player.stop()`` (instant), cancel the response task
-(which tears down every child task: LLM stream, TTS jobs, writer, filler timer),
-map ``played_samples`` onto the per-chunk sample counts we tracked, keep only the
-words that were actually heard and store them with `` [interrupted]``.
-If nothing was heard yet (interrupted while thinking) the user message is taken
-back and merged with the next utterance, so "Hey Eva ... how's it going" becomes
-one turn instead of two.
+segmenter reports ``barge_in_min_speech_ms`` of speech-positive VAD windows
+(``speaking_ms`` while the user talks, ``SpeechEnd.speech_ms`` if the utterance
+ended first; never the utterance *length*, which includes the pre-speech ring
+buffer and the trailing silence), so a cough or a "mm" never stops her.  On
+confirmation: ``turn.cancelled`` is set, ``player.stop()`` (instant), the response
+task is cancelled (which tears down every child task: LLM stream, TTS jobs,
+writer, filler timer) and awaited, then ``player.stop()`` once more so that a
+writer or filler wake-up that was already scheduled in the same event-loop
+iteration can never leave audio behind (they also check ``turn.cancelled``
+before writing).  ``played_samples`` is mapped onto the per-chunk sample counts
+we tracked, only the words that were actually heard are kept and stored with
+`` [interrupted]``.  If nothing was heard yet (interrupted while thinking) the
+user message is taken back and merged with the next utterance, so "Hey Eva ...
+how's it going" becomes one turn instead of two.  A barge-in that lands while a
+tool is executing answers every unanswered ``tool_call_id`` with a synthetic
+``role: tool`` message before the ``[interrupted]`` assistant message, so the
+history always satisfies the chat contract.
 
 Streaming STT
 -------------
@@ -32,10 +41,31 @@ which returns in ~0.3 s instead of the ~1.1 s batch round trip.  Utterances that
 are not answered directly (a blip below ``barge_in_min_speech_ms``, a queued
 utterance while barge-in is off, two utterances merged after a thinking-phase
 interruption) are ``discard()``-ed on the stream and transcribed in batch instead.
-A ``commit()`` that has not returned after ``STT_COMMIT_DEADLINE_S`` is cancelled
-(its socket dropped) and the utterance audio is sent to the batch endpoint *after
+A ``commit()`` that has not returned by the commit deadline is cancelled (its
+socket dropped) and the utterance audio is sent to the batch endpoint *after
 that*, never concurrently: two Scribe requests in flight at once were measured to
-slow both down 10-30x (``bench/out/e2e_cloud-fast_race.json``).
+slow both down 10-30x (``bench/out/e2e_cloud-fast_race.json``).  The deadline is
+``STT_COMMIT_DEADLINE_S`` when the service is fast and grows with the slowest
+recent Scribe round trip (last commit, last batch request, the warmup probe) x
+``STT_COMMIT_DEADLINE_FACTOR``: the batch endpoint is slow whenever the commits
+are (same account state, measured 4-10x on both), so a fixed 2.5 s deadline paid
+2.5 + 14 s for an 8 s utterance whose commits were returning in 1.7-2 s
+(``bench/out/verify_cloud_run.json``).
+
+Tool rounds
+-----------
+At most ``MAX_TOOL_ROUNDS`` tool rounds per turn: the round after the last one is
+requested without tools and any tool call it still produces (native, or leaked
+as JSON text and recovered) is dropped instead of executed, so a model that
+keeps emitting calls can never loop and re-run its tools.
+
+LLM keep-alive
+--------------
+If the LLM exposes ``ping()`` (``OpenAICompatLLM`` does: ``GET /models`` on the
+pooled connection) it is called after ``LLM_KEEPALIVE_S`` of LLM idleness while
+no response is in flight.  The Cerebras TTFT tail (2-3 s client-side while the
+server reports 0.13-0.18 s) matches the cold-connection cost measured in
+``DESIGN.md``; a turn never starts a request while a ping is in flight.
 
 Empty replies
 -------------
@@ -88,7 +118,10 @@ CARRY_GAP_S = 0.3  # silence inserted between two merged utterances
 INTERRUPTED_MARK = " [interrupted]"
 STREAM_RING_EXTRA_MS = 200  # ring buffer slack on top of prespeech + min_speech
 STREAM_FEED_TIMEOUT_S = 0.25  # a feed() slower than this (socket reconnect) breaks the stream for the turn
-STT_COMMIT_DEADLINE_S = 2.5  # a streaming commit() slower than this is cancelled, then ONE batch request follows
+STT_COMMIT_DEADLINE_S = 2.5  # base deadline: a streaming commit() slower than this is cancelled, then ONE batch request follows
+STT_COMMIT_DEADLINE_FACTOR = 2.0  # ... but never sooner than this x the slowest recent Scribe round trip (see docstring)
+LLM_KEEPALIVE_S = 15.0  # ping the LLM's pooled connection after this much LLM idleness (0 = off)
+TOOL_CANCELLED_RESULT = "cancelled: the user interrupted before the tool finished; do not assume it ran"
 FILLER_TTS_GRACE_S = 0.6  # extra wait before a filler when a TTS request is already running
 EMPTY_REPLY_PREFILL = "Mm."
 EMPTY_REPLY_TEXT = "Hm, sorry, I lost my train of thought there. Say that again?"
@@ -320,6 +353,7 @@ class _Turn:
     rounds_in_history: int = 0  # assistant tool-call messages already appended
     recovered_seq: list[int] = field(default_factory=lambda: [0])  # ids for recovered tool calls
     finished: bool = False
+    cancelled: bool = False  # set before the task is cancelled: no child may write audio after this
     error: str | None = None
     task: asyncio.Task[None] | None = None
     children: set[asyncio.Task[Any]] = field(default_factory=set)
@@ -404,6 +438,12 @@ class VoiceAgent:
         self._stream_open = False  # frames are being fed to the STT right now
         self._stream_broken = False  # feed() failed for the utterance in progress -> batch
         self.stream_turns = 0  # turns transcribed through the streaming path (for reports)
+        self._stt_recent_s: dict[str, float] = {}  # latency of the last "commit" / "batch" Scribe request
+        # LLM keep-alive (see module docstring)
+        self._llm_last_t = _now()
+        self._keepalive_task: asyncio.Task[None] | None = None
+        self._ping_task: asyncio.Task[Any] | None = None
+        self.pings = 0
 
     # ------------------------------------------------------------------ public
     @property
@@ -415,6 +455,7 @@ class VoiceAgent:
         if self._prepared:
             return
         self._prepared = True
+        self._start_keepalive()
         for text in self._fillers_text:
             try:
                 audio = await self._render_to_bytes(text)
@@ -478,6 +519,62 @@ class VoiceAgent:
         await self._interrupt(reason)
         return True
 
+    async def close(self) -> None:
+        """Stop background housekeeping (the LLM keep-alive).  ``run()`` calls it on
+        exit; text-mode callers (``say()`` only) call it themselves."""
+        self._stopping = True
+        for task in (self._keepalive_task, self._ping_task):
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        self._keepalive_task = None
+        self._ping_task = None
+
+    # --------------------------------------------------------- LLM keep-alive
+    def _start_keepalive(self) -> None:
+        if self._keepalive_task is not None or LLM_KEEPALIVE_S <= 0 or self._stopping:
+            return
+        if not callable(getattr(self.llm, "ping", None)):
+            return
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop(), name="eva-keepalive")
+
+    async def _keepalive_loop(self) -> None:
+        """``llm.ping()`` whenever the LLM has been idle for ``LLM_KEEPALIVE_S`` and no
+        response is in flight, so the pooled keep-alive connection is never stale
+        when the next turn needs it."""
+        while not self._stopping:
+            idle = _now() - self._llm_last_t
+            if self._response is not None or (self.segmenter is not None and self.segmenter.speaking):
+                # a turn is running, or one is about to start: a ping now could still be in
+                # flight when the commit returns and the completion has to wait for it
+                await asyncio.sleep(0.25)
+                continue
+            if idle < LLM_KEEPALIVE_S:
+                await asyncio.sleep(max(0.1, LLM_KEEPALIVE_S - idle))
+                continue
+            self._ping_task = asyncio.ensure_future(self.llm.ping())  # type: ignore[attr-defined]
+            try:
+                secs = await self._ping_task
+                self.pings += 1
+                self._emit("llm_ping", {"seconds": None if not isinstance(secs, (int, float)) else round(secs, 3)})
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # a failed ping is only a missed warm-up
+                log.debug("llm ping failed: %s", e)
+            finally:
+                self._ping_task = None
+                self._llm_last_t = _now()
+
+    async def _await_ping(self) -> None:
+        """Never start a completion beside a ping: with the one warm connection busy the
+        request would open a second, cold one."""
+        ping = self._ping_task
+        if ping is not None and not ping.done():
+            await asyncio.wait({ping}, timeout=1.0)
+
     async def poll_pending_events(self) -> bool:
         """Start a response turn for one pending tool event (e.g. a finished timer)
         if nobody is talking.  Returns True if a turn was started."""
@@ -511,11 +608,18 @@ class VoiceAgent:
                 await self._start_voice_turn(ev, streamed=streamed)
             elif self._barge_candidate is not None:
                 self._barge_candidate = None
-                if ev.duration_s * 1000 >= self.settings.barge_in_min_speech_ms:
+                # speech-positive VAD time, not the utterance length: the segmenter seeds
+                # every utterance with up to prespeech_buffer_ms of ring audio and keeps a
+                # 150 ms tail, so duration_s is >= ~0.5 s for any blip that got this far
+                speech_ms = float(getattr(ev, "speech_ms", 0.0) or 0.0) or ev.duration_s * 1000
+                if speech_ms >= self.settings.barge_in_min_speech_ms:
                     await self._interrupt("barge-in", t_trigger=ev.t)
                     await self._start_voice_turn(ev, streamed=streamed)
                 else:
-                    self._emit("barge_in_ignored", {"duration_s": round(float(ev.duration_s), 3)})
+                    self._emit(
+                        "barge_in_ignored",
+                        {"duration_s": round(float(ev.duration_s), 3), "speech_ms": round(speech_ms, 1)},
+                    )
                     await self._stt_discard(keep_audio=False)
             else:
                 # response in flight, barge-in disabled: answer it after this turn (in batch)
@@ -674,9 +778,10 @@ class VoiceAgent:
         endpoint (the STT waits for the socket to close before posting).
         """
         assert turn.pcm is not None
+        deadline = self._commit_deadline()
         commit = asyncio.ensure_future(self.stt.commit())  # type: ignore[attr-defined]
         try:
-            done, _ = await asyncio.wait({commit}, timeout=STT_COMMIT_DEADLINE_S)
+            done, _ = await asyncio.wait({commit}, timeout=deadline)
         finally:
             if not commit.done():  # deadline passed, or this turn was cancelled (barge-in)
                 commit.cancel()
@@ -690,10 +795,11 @@ class VoiceAgent:
             tr = commit.result()
             self.stream_turns += 1
             tr.meta.setdefault("path", "stream")
+            self._stt_recent_s["batch" if tr.meta.get("fallback") else "commit"] = float(tr.latency_s)
             return tr
         if commit.cancelled():
-            reason = f"commit slower than {STT_COMMIT_DEADLINE_S} s"
-            self._emit("stt_commit_timeout", {"after_s": STT_COMMIT_DEADLINE_S})
+            reason = f"commit slower than {deadline:.1f} s"
+            self._emit("stt_commit_timeout", {"after_s": round(deadline, 3), "base_s": STT_COMMIT_DEADLINE_S})
         else:
             exc = commit.exception()
             reason = f"commit failed: {type(exc).__name__}"
@@ -705,12 +811,25 @@ class VoiceAgent:
         self._emit("stt_fallback", {"reason": reason, "latency_s": round(tr.latency_s, 3)})
         return tr
 
+    def _commit_deadline(self) -> float:
+        """How long to wait for a streaming commit before ONE batch request replaces it.
+
+        Cancelling costs the time already waited plus a full batch round trip, and the
+        batch endpoint is slow whenever the commits are, so the deadline is at least
+        ``STT_COMMIT_DEADLINE_FACTOR`` x the slowest recent Scribe round trip: the last
+        commit, the last batch request, or the STT's own warmup probe
+        (``last_batch_s``).  Fast service: ``STT_COMMIT_DEADLINE_S``.
+        """
+        recent = [self._stt_recent_s.get("commit"), self._stt_recent_s.get("batch"), getattr(self.stt, "last_batch_s", None)]
+        slowest = max((float(v) for v in recent if v), default=0.0)
+        return max(float(STT_COMMIT_DEADLINE_S), STT_COMMIT_DEADLINE_FACTOR * slowest)
+
     async def _transcribe_batch(self, pcm: np.ndarray) -> Transcript:
         """Whole-utterance transcription; a streaming STT may offer a dedicated batch entry point."""
         fn = getattr(self.stt, "transcribe_batch", None) if self.stt_streaming else None
-        if fn is not None:
-            return await fn(pcm, MIC_SAMPLE_RATE)
-        return await self.stt.transcribe(pcm, MIC_SAMPLE_RATE)
+        tr = await (fn(pcm, MIC_SAMPLE_RATE) if fn is not None else self.stt.transcribe(pcm, MIC_SAMPLE_RATE))
+        self._stt_recent_s["batch"] = float(tr.latency_s)
+        return tr
 
     async def _generate_and_speak(self, turn: _Turn) -> None:
         schemas = [t.openai_schema() for t in self.tools] or None
@@ -737,6 +856,11 @@ class VoiceAgent:
                 turn.error = repr(e)
                 break
             prefill = None
+            if tool_calls and use_tools is None:
+                # tools were not offered this round (the cap is reached, or there are none):
+                # a call the model produced anyway is never executed, so the loop ends here
+                self._emit("tool_calls_dropped", {"round": round_no, "names": [tc.name for tc in tool_calls]})
+                tool_calls = []
             if not tool_calls and not round_text.strip() and not turn.chunks and not last_results:
                 # nothing said, nothing called: Cerebras qwen (reasoning off) does this now and then
                 empty_attempts += 1
@@ -775,10 +899,20 @@ class VoiceAgent:
             )
             turn.rounds_in_history += 1
             last_results = []
-            for tc in tool_calls:
-                result = await self._execute_tool(turn, tc)
-                last_results.append(result)
-                self.messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+            answered: set[str] = set()
+            try:
+                for tc in tool_calls:
+                    result = await self._execute_tool(turn, tc)
+                    last_results.append(result)
+                    self.messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                    answered.add(tc.id)
+            except asyncio.CancelledError:
+                # a barge-in while a tool ran: every tool_call_id in the assistant message
+                # above must still be answered or the history breaks the chat contract
+                for tc in tool_calls:
+                    if tc.id not in answered:
+                        self.messages.append({"role": "tool", "tool_call_id": tc.id, "content": TOOL_CANCELLED_RESULT})
+                raise
             round_no += 1
         if not final_text and last_results:
             # the model went quiet after the tool: read the result out instead of silence
@@ -841,6 +975,8 @@ class VoiceAgent:
         messages = self._messages_for_llm()
         if prefill:
             messages.append({"role": "assistant", "content": prefill})
+        await self._await_ping()
+        self._llm_last_t = _now()
         stream = self.llm.stream(messages, tools=use_tools)
         try:
             async for ev in stream:
@@ -859,6 +995,7 @@ class VoiceAgent:
                 elif isinstance(ev, LLMDone):
                     self._emit("llm_done", {"round": round_no, "finish": ev.finish_reason, "usage": ev.usage})
         finally:
+            self._llm_last_t = _now()
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 try:
@@ -935,6 +1072,8 @@ class VoiceAgent:
                 job.play_started.set()
 
     def _write_real(self, turn: _Turn, job: _ChunkJob, b: bytes) -> None:
+        if turn.cancelled:
+            return  # the interrupt already ran player.stop(); this wake-up was scheduled before it
         if not turn.marked:
             self.player.mark()
             turn.marked = True
@@ -960,7 +1099,7 @@ class VoiceAgent:
         delay = base + self.settings.filler_after_ms / 1000.0 - _now()
         if delay > 0:
             await asyncio.sleep(delay)
-        if turn.audio_started or turn.finished:
+        if turn.audio_started or turn.finished or turn.cancelled:
             return
         # If the LLM is already producing text (a TTS request follows within a chunk)
         # the real audio is at most a TTFA away (~0.2-0.35 s) while a filler costs
@@ -969,8 +1108,10 @@ class VoiceAgent:
         deadline = _now() + FILLER_TTS_GRACE_S
         while (turn.metrics.llm_first_token is not None or any(not j.silent for j in turn.chunks)) and _now() < deadline:
             await asyncio.sleep(0.05)
-            if turn.audio_started or turn.finished:
+            if turn.audio_started or turn.finished or turn.cancelled:
                 return
+        if turn.cancelled:
+            return
         audio = self._fillers_audio[self._filler_i % len(self._fillers_audio)]
         self._filler_i += 1
         if not turn.marked:
@@ -1018,6 +1159,7 @@ class VoiceAgent:
         if turn is None:
             return
         t0 = _now()
+        turn.cancelled = True  # before stop(): a writer/filler wake-up already scheduled must not write
         played = self.player.stop()
         if not turn.marked:
             played = 0
@@ -1026,6 +1168,9 @@ class VoiceAgent:
         if turn.task is not None and not turn.task.done():
             turn.task.cancel()
             await asyncio.wait({turn.task})
+        # every child (writer, TTS jobs, filler timer) is cancelled and awaited by the
+        # task's finally, so nothing can write after this second stop
+        self.player.stop()
         if stt_was_inflight:
             # the cancelled commit() left the server with an uncommitted segment: drop that
             # socket but keep (and re-send) whatever the user has said since
@@ -1122,9 +1267,11 @@ class VoiceAgent:
         self._stopping = True
         turn = self._response
         if turn is not None and turn.task is not None and not turn.task.done():
+            turn.cancelled = True
             played = self.player.stop() if turn.marked else 0
             turn.task.cancel()
             await asyncio.wait({turn.task})
+            self.player.stop()
             self._finish_turn(turn, interrupted=True, played=played)
         else:
             try:
@@ -1132,6 +1279,7 @@ class VoiceAgent:
             except Exception:  # pragma: no cover
                 pass
         self._set_state(State.LISTENING)
+        await self.close()
         aclose = getattr(self.frames, "aclose", None)
         if aclose is not None:
             try:

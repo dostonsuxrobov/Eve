@@ -94,6 +94,11 @@ class SpeechEnd:
     t: float  # time.perf_counter() when the endpoint was detected
     pcm: np.ndarray  # int16 utterance incl. pre-speech buffer, trailing silence <= 150 ms
     duration_s: float  # len(pcm) / sample_rate
+    # speech-positive VAD windows x window length: what the pipeline compares with
+    # barge_in_min_speech_ms.  duration_s is not usable for that: it includes up to
+    # prespeech_buffer_ms of ring audio and the 150 ms tail, so it is >= ~0.5 s for
+    # any blip that was confirmed at all.
+    speech_ms: float = 0.0
 
 
 class UtteranceSegmenter:
@@ -279,6 +284,7 @@ class UtteranceSegmenter:
         return end
 
     def _finish(self, now: float) -> SpeechEnd:
+        speech_ms = self._speech_windows * self.window_ms
         full = np.concatenate(self._utt) if self._utt else np.empty(0, np.int16)
         last_speech = self._tighten(full, self._last_speech_samples)
         end = min(len(full), last_speech + self._tail_keep)
@@ -291,4 +297,4 @@ class UtteranceSegmenter:
         if len(tail):
             self._push_ring(tail[-self._prespeech_samples :].copy())
         self._reset_utt()
-        return SpeechEnd(t=now, pcm=pcm, duration_s=len(pcm) / self.sample_rate)
+        return SpeechEnd(t=now, pcm=pcm, duration_s=len(pcm) / self.sample_rate, speech_ms=speech_ms)
