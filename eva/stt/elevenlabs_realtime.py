@@ -38,6 +38,13 @@ Measured server quirks handled here:
     idle; measured to keep a session alive for 40 s with the commit still correct.
     Should the server close an idle session anyway, a replacement is pre-opened
     immediately so the next ``feed()`` never pays the handshake.
+  * Never two Scribe requests at once.  A batch request sent while a realtime
+    commit was still being served made both crawl (4 / 31 / 7.5 s per turn,
+    ``bench/out/e2e_cloud-fast_race.json``; the account's concurrency limit).  One
+    ``asyncio.Lock`` therefore serializes ``commit()`` and ``transcribe_batch()``,
+    a batch request waits (bounded) until retired sockets have finished closing,
+    a new socket is only opened once the retired one is closed, and ``warmup()``
+    makes its batch call before it opens the first realtime session.
 """
 from __future__ import annotations
 
@@ -348,6 +355,9 @@ class ElevenLabsRealtimeSTT:
         self._sent_chunks = 0  # how many entries of _segment the current session has received
         self._closing: set[asyncio.Task[None]] = set()  # retired sockets being closed in the background
         self._fallback: ElevenLabsScribeSTT | None = None
+        # One Scribe request (realtime commit or batch) in flight at a time: see module doc.
+        self._api_lock = asyncio.Lock()
+        self.close_wait_s = 1.5  # max wait for a retired socket to close before the next request / socket
         self.last_connect_s: float | None = None
         self.sample_rate = MIC_SAMPLE_RATE
         self._closed_flag = False
@@ -365,8 +375,13 @@ class ElevenLabsRealtimeSTT:
         return f"{REALTIME_URL}?{urlencode(params)}"
 
     async def open_session(self, sample_rate: int = MIC_SAMPLE_RATE) -> RealtimeSession:
-        """Open a new websocket and wait for ``session_started``."""
+        """Open a new websocket and wait for ``session_started``.
+
+        A retired socket that is still closing is awaited first (bounded by
+        ``close_wait_s``) so the server never sees two sessions from us at once.
+        """
         t0 = time.perf_counter()
+        await self._await_closing()
         ssl_ctx = await ensure_ssl_context()  # shared; avoids ~150 ms of blocking per socket
         try:
             ws = await asyncio.wait_for(
@@ -452,6 +467,17 @@ class ElevenLabsRealtimeSTT:
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
 
+    async def _await_closing(self) -> None:
+        """Wait (at most ``close_wait_s``) until retired sockets have finished closing.
+
+        Called before a batch request and before a new socket is opened, so that a
+        session the server may still count as active never overlaps with the next
+        request (measured: overlapping requests are served 10-30x slower).
+        """
+        pending = [t for t in self._closing if not t.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=self.close_wait_s)
+
     async def _retire(self, session: RealtimeSession) -> None:
         if self._session is session:
             self._session = None
@@ -492,7 +518,16 @@ class ElevenLabsRealtimeSTT:
         await self._flush(session)
 
     async def commit(self) -> Transcript:
-        """Finish the utterance: await the committed text, then rotate the socket."""
+        """Finish the utterance: await the committed text, then rotate the socket.
+
+        Holds ``_api_lock`` for the whole call, so a batch fallback never overlaps
+        the realtime commit and no other Scribe request can start meanwhile.  The
+        replacement socket is pre-opened only after any batch fallback returned.
+        """
+        async with self._api_lock:
+            return await self._commit_locked()
+
+    async def _commit_locked(self) -> Transcript:
         t0 = time.perf_counter()
         segment = np.concatenate(self._segment) if self._segment else np.zeros(0, dtype=np.int16)
         session: RealtimeSession | None = None
@@ -506,29 +541,34 @@ class ElevenLabsRealtimeSTT:
             self._segment, self._sent_chunks = [], 0
             if session is not None:
                 await self._retire(session)
-            self._preconnect()
-            if self.fallback_to_batch and self._is_voiced(segment):
-                log.warning("%s commit failed (%s: %s); falling back to batch", self.name, type(exc).__name__, exc)
-                tr = await self._batch(segment)
-                tr.meta["fallback"] = f"batch after {type(exc).__name__}"
-                tr.latency_s = time.perf_counter() - t0
-                return tr
-            raise
+            try:
+                if self.fallback_to_batch and self._is_voiced(segment):
+                    log.warning("%s commit failed (%s: %s); falling back to batch", self.name, type(exc).__name__, exc)
+                    tr = await self._batch(segment)  # waits for the retired socket to close first
+                    tr.meta["fallback"] = f"batch after {type(exc).__name__}"
+                    tr.latency_s = time.perf_counter() - t0
+                    return tr
+                raise
+            finally:
+                self._preconnect()
         if self.rotate_sessions:
             await self._retire(session)
-            self._preconnect()
-        tr.meta["model_id"] = self.model_id
-        tr.meta["audio_s"] = round(len(segment) / self.sample_rate, 3)
-        if not tr.text and self.fallback_to_batch and self._is_voiced(segment):
-            log.warning(
-                "%s empty commit for voiced %.1f s audio; falling back to batch", self.name, len(segment) / self.sample_rate
-            )
-            fb = await self._batch(segment)
-            fb.meta.update({"fallback": "batch after empty commit", "realtime_meta": tr.meta})
-            fb.latency_s = time.perf_counter() - t0
-            return fb
-        tr.latency_s = time.perf_counter() - t0
-        return tr
+        try:
+            tr.meta["model_id"] = self.model_id
+            tr.meta["audio_s"] = round(len(segment) / self.sample_rate, 3)
+            if not tr.text and self.fallback_to_batch and self._is_voiced(segment):
+                log.warning(
+                    "%s empty commit for voiced %.1f s audio; falling back to batch", self.name, len(segment) / self.sample_rate
+                )
+                fb = await self._batch(segment)
+                fb.meta.update({"fallback": "batch after empty commit", "realtime_meta": tr.meta})
+                fb.latency_s = time.perf_counter() - t0
+                return fb
+            tr.latency_s = time.perf_counter() - t0
+            return tr
+        finally:
+            if self.rotate_sessions:
+                self._preconnect()
 
     async def discard(self, keep_audio: bool = False) -> None:
         """Abandon the utterance in progress on the server side.
@@ -565,7 +605,8 @@ class ElevenLabsRealtimeSTT:
         utterances merged after a thinking-phase interruption.
         """
         t0 = time.perf_counter()
-        tr = await self._batch(as_int16_mono(pcm), sample_rate)
+        async with self._api_lock:  # never alongside a realtime commit
+            tr = await self._batch(as_int16_mono(pcm), sample_rate)
         tr.meta["mode"] = "batch"
         tr.latency_s = time.perf_counter() - t0
         return tr
@@ -574,8 +615,10 @@ class ElevenLabsRealtimeSTT:
         return is_voiced(pcm, self.sample_rate, rms_threshold=self.voiced_rms)
 
     async def _batch(self, pcm: np.ndarray, sample_rate: int | None = None) -> Transcript:
+        """One batch request (caller holds ``_api_lock``); retired sockets are closed first."""
         if self._fallback is None:
             self._fallback = ElevenLabsScribeSTT(self.api_key, model_id="scribe_v2", language=self.language)
+        await self._await_closing()
         return await self._fallback.transcribe(pcm, sample_rate or self.sample_rate)
 
     # --------------------------------------------------------------- protocol
@@ -584,9 +627,10 @@ class ElevenLabsRealtimeSTT:
         t0 = time.perf_counter()
         self._closed_flag = False
         try:
+            if self.fallback_to_batch:  # warm the batch TLS connection first, with no realtime session open
+                async with self._api_lock:
+                    await self._batch(np.zeros(int(0.4 * self.sample_rate), dtype=np.int16))
             await self._current()
-            if self.fallback_to_batch:  # warm the batch TLS connection too
-                await self._batch(np.zeros(int(0.4 * self.sample_rate), dtype=np.int16))
             log.info("%s warmup: %.3f s", self.name, time.perf_counter() - t0)
         except Exception as exc:
             log.warning("%s warmup failed after %.3f s: %s", self.name, time.perf_counter() - t0, exc)

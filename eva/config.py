@@ -87,12 +87,20 @@ class Preset:
     settings: PipelineSettings = field(default_factory=PipelineSettings)
 
 
+# LLM "reasoning" values for Cerebras (mapped by eva.factory.build_llm):
+#   "low" / "medium" / "high" -> reasoning_effort (the default for every qwen preset here).
+#   "none" (or None / "off")  -> disable_reasoning: true. Fastest content TTFT (0.29 s vs
+#       0.43 s median) but qwen-3.8-27b then ends 25-40 % of very short replies mid-word
+#       ("That stings a") and the broken text cascades through the history
+#       (docs/EVAL_REPORT.md section 6). Set it only if you accept that.
+# max_tokens is raised to 800 on the reasoning presets so that a long think can never
+# leave the reply empty (finish=length with 400 was measured 2/82 turns).
 PRESETS: dict[str, Preset] = {
     "cloud-fast": Preset(
         name="cloud-fast",
         description="ElevenLabs Scribe realtime STT + Cerebras qwen-3.8-27b (low reasoning) + ElevenLabs Flash. Lowest cloud latency.",
         stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low"},
+        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
         tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
     ),
     "cloud-smart": Preset(
@@ -106,7 +114,7 @@ PRESETS: dict[str, Preset] = {
         name="expressive",
         description="Cerebras qwen + ElevenLabs v3 with audio tags ([laughs], [sighs]). Most emotional, highest TTS latency.",
         stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low"},
+        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
         tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_v3", "mode": "http"},
     ),
     "local-brain": Preset(
@@ -120,7 +128,7 @@ PRESETS: dict[str, Preset] = {
         name="local-stt",
         description="Local faster-whisper STT + Cerebras + ElevenLabs. Removes one network hop.",
         stt={"kind": "faster-whisper", "model": "base.en", "device": "cpu"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low"},
+        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
         tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
     ),
     "fully-local": Preset(

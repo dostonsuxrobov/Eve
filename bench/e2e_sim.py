@@ -613,6 +613,50 @@ async def test_llm_failure(verbose: bool) -> tuple[Check, dict[str, Any]]:
     return c, {"turns": _turn_rows([m1, m2])}
 
 
+async def test_commit_deadline(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(m) streaming STT whose commit() is slower than STT_COMMIT_DEADLINE_S: the commit
+    is cancelled and its socket discarded BEFORE exactly one batch request is made
+    (never two Scribe requests in flight), and the turn still gets answered."""
+    import eva.pipeline as pl
+
+    c = Check()
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    stt = MockStreamingSTT(["Hey Eva, quick one."], delay_s=0.3, commit_delay_s=5.0)
+    llm = MockLLM(["Sure, go ahead."], ttft_s=0.3)
+    seg = ScriptedSegmenter(script=[(0.3, 1.0)])
+    old = pl.STT_COMMIT_DEADLINE_S
+    pl.STT_COMMIT_DEADLINE_S = 0.4
+    try:
+        agent = _mock_agent(
+            stt=stt, llm=llm, tts=MockTTS(), player=player, segmenter=seg, frames=silent_frames(10),
+            settings=_settings(filler_after_ms=0), log=log, max_turns=1,
+        )
+        turns = await agent.run()
+    finally:
+        pl.STT_COMMIT_DEADLINE_S = old
+    c.ok(len(turns) == 1, f"expected 1 turn, got {len(turns)}")
+    c.ok(log.first("stt_commit_timeout") is not None, "no stt_commit_timeout event")
+    c.ok(log.first("stt_fallback") is not None, "no stt_fallback event")
+    c.ok(len(stt.commits) == 0, f"no commit should have completed, got {stt.commits}")
+    c.ok(len(stt.calls) == 1, f"exactly one batch request expected, got {len(stt.calls)}")
+    c.ok(len(stt.commit_cancelled) == 1, f"the late commit should have been cancelled once, got {stt.commit_cancelled}")
+    if stt.commit_cancelled and stt.calls:
+        c.ok(
+            stt.commit_cancelled[0] <= stt.calls[0]["t"],
+            f"batch request started {stt.calls[0]['t'] - stt.commit_cancelled[0]:+.3f} s relative to the commit cancel: must not overlap",
+        )
+    c.ok(any(not d["keep_audio"] for d in stt.discards), f"cancelled commit's socket should be discarded: {stt.discards}")
+    if turns:
+        c.ok(turns[0].user_text == "Hey Eva, quick one.", f"user_text {turns[0].user_text!r}")
+        b = turns[0].breakdown()
+        c.ok(b["stt"] is not None and 0.6 <= b["stt"] <= 1.2, f"stt stage {b['stt']} should be ~deadline 0.4 + batch 0.3 s")
+    c.ok(agent.stream_turns == 0, f"stream_turns {agent.stream_turns} (the turn went batch)")
+    ev = log.first("stt")
+    c.ok(ev is not None and (ev[1].get("fallback") or "").startswith("batch after commit slower"), f"stt event fallback: {ev}")
+    return c, {"turns": _turn_rows(turns), "calls": stt.calls, "discards": stt.discards, "commit_cancelled": stt.commit_cancelled}
+
+
 MOCK_TESTS = [
     ("a_normal_two_turns", test_normal_two_turns),
     ("b_barge_in", test_barge_in),
@@ -626,6 +670,7 @@ MOCK_TESTS = [
     ("j_streaming_thinking_merge", test_streaming_thinking_merge),
     ("k_empty_reply", test_empty_reply),
     ("l_llm_failure", test_llm_failure),
+    ("m_commit_deadline", test_commit_deadline),
 ]
 
 
@@ -913,14 +958,14 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=180.0)
     ap.add_argument("--out", help="JSON output path (default bench/out/e2e_<preset>.json)")
     ap.add_argument("--tts-mode", choices=["ws", "http"], help="override the preset's ElevenLabs transport")
-    ap.add_argument("--stt-race-after", type=float, help="override eva.pipeline.STT_RACE_AFTER_S (testing the batch race)")
+    ap.add_argument("--stt-commit-deadline", type=float, help="override eva.pipeline.STT_COMMIT_DEADLINE_S (seconds before a late commit is abandoned for batch)")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARNING, format="%(name)s %(levelname)s %(message)s")
-    if args.stt_race_after is not None:
+    if args.stt_commit_deadline is not None:
         import eva.pipeline as _pl
 
-        _pl.STT_RACE_AFTER_S = args.stt_race_after
+        _pl.STT_COMMIT_DEADLINE_S = args.stt_commit_deadline
     if args.mock:
         return asyncio.run(run_mock_suite(args.verbose, args.only))
     return asyncio.run(run_real(args))

@@ -32,6 +32,10 @@ which returns in ~0.3 s instead of the ~1.1 s batch round trip.  Utterances that
 are not answered directly (a blip below ``barge_in_min_speech_ms``, a queued
 utterance while barge-in is off, two utterances merged after a thinking-phase
 interruption) are ``discard()``-ed on the stream and transcribed in batch instead.
+A ``commit()`` that has not returned after ``STT_COMMIT_DEADLINE_S`` is cancelled
+(its socket dropped) and the utterance audio is sent to the batch endpoint *after
+that*, never concurrently: two Scribe requests in flight at once were measured to
+slow both down 10-30x (``bench/out/e2e_cloud-fast_race.json``).
 
 Empty replies
 -------------
@@ -84,7 +88,7 @@ CARRY_GAP_S = 0.3  # silence inserted between two merged utterances
 INTERRUPTED_MARK = " [interrupted]"
 STREAM_RING_EXTRA_MS = 200  # ring buffer slack on top of prespeech + min_speech
 STREAM_FEED_TIMEOUT_S = 0.25  # a feed() slower than this (socket reconnect) breaks the stream for the turn
-STT_RACE_AFTER_S = 1.5  # a streaming commit() slower than this is raced against a batch request
+STT_COMMIT_DEADLINE_S = 2.5  # a streaming commit() slower than this is cancelled, then ONE batch request follows
 FILLER_TTS_GRACE_S = 0.6  # extra wait before a filler when a TTS request is already running
 EMPTY_REPLY_PREFILL = "Mm."
 EMPTY_REPLY_TEXT = "Hm, sorry, I lost my train of thought there. Say that again?"
@@ -636,7 +640,7 @@ class VoiceAgent:
         turn.stt_inflight = True
         try:
             if turn.use_stream:
-                tr = await self._commit_with_race(turn)
+                tr = await self._commit_then_batch(turn)
             else:
                 tr = await self._transcribe_batch(turn.pcm)
         finally:
@@ -658,52 +662,48 @@ class VoiceAgent:
             return ""
         return text
 
-    async def _commit_with_race(self, turn: _Turn) -> Transcript:
-        """``stt.commit()`` with a batch request racing it after ``STT_RACE_AFTER_S``.
+    async def _commit_then_batch(self, turn: _Turn) -> Transcript:
+        """``stt.commit()`` with a deadline; on timeout or failure ONE batch request follows.
 
-        The realtime commit returns in ~0.3 s typically but has a server-side tail of
-        2-4 s (measured 2 of 3 turns in one run).  Once it is late, a batch request on
-        the utterance audio is started as well and the first transcript wins; the
-        loser is cancelled (a cancelled commit drops its socket via ``discard``).
-        A commit that fails outright falls back to batch too.
+        The realtime commit returns in 0.15-0.4 s typically but has a server-side
+        tail of 2-4 s.  Never two Scribe requests at once: a batch request started
+        while a commit was still being served made both crawl (4 / 31 / 7.5 s per
+        turn, ``bench/out/e2e_cloud-fast_race.json``, the account's concurrency
+        limit).  So a late commit is cancelled first, which drops its socket via
+        ``discard()``, and only then is the utterance audio sent to the batch
+        endpoint (the STT waits for the socket to close before posting).
         """
         assert turn.pcm is not None
         commit = asyncio.ensure_future(self.stt.commit())  # type: ignore[attr-defined]
-        batch: asyncio.Task[Transcript] | None = None
         try:
-            done, _ = await asyncio.wait({commit}, timeout=STT_RACE_AFTER_S)
-            if not done:
-                self._emit("stt_race", {"after_s": STT_RACE_AFTER_S})
-                batch = asyncio.ensure_future(self._transcribe_batch(turn.pcm))
-                done, _ = await asyncio.wait({commit, batch}, return_when=asyncio.FIRST_COMPLETED)
-                if commit in done and commit.exception() is not None and batch not in done:
-                    done, _ = await asyncio.wait({batch})
-            if commit.done() and commit.exception() is None:
-                tr = commit.result()
-                self.stream_turns += 1
-                tr.meta.setdefault("won", "stream")
-                return tr
-            if batch is not None and batch.done() and batch.exception() is None:
-                tr = batch.result()
-                tr.meta["won"] = "batch"
-                self._emit("stt_race_won", {"by": "batch", "latency_s": round(tr.latency_s, 3)})
-                return tr
-            exc = commit.exception() if commit.done() else None
-            log.warning("streaming stt commit failed (%s); falling back to batch", exc)
-            self._emit("error", {"where": "stt_stream", "error": repr(exc)})
-            if batch is not None:
-                return await batch
-            return await self._transcribe_batch(turn.pcm)
+            done, _ = await asyncio.wait({commit}, timeout=STT_COMMIT_DEADLINE_S)
         finally:
-            for task in (commit, batch):
-                if task is not None and not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
+            if not commit.done():  # deadline passed, or this turn was cancelled (barge-in)
+                commit.cancel()
+                try:
+                    await commit
+                except (asyncio.CancelledError, Exception):
+                    pass
             if commit.cancelled():
                 await self._stt_discard(keep_audio=self._stream_open)
+        if not commit.cancelled() and commit.exception() is None:
+            tr = commit.result()
+            self.stream_turns += 1
+            tr.meta.setdefault("path", "stream")
+            return tr
+        if commit.cancelled():
+            reason = f"commit slower than {STT_COMMIT_DEADLINE_S} s"
+            self._emit("stt_commit_timeout", {"after_s": STT_COMMIT_DEADLINE_S})
+        else:
+            exc = commit.exception()
+            reason = f"commit failed: {type(exc).__name__}"
+            log.warning("streaming stt commit failed (%s); falling back to batch", exc)
+            self._emit("error", {"where": "stt_stream", "error": repr(exc)})
+        tr = await self._transcribe_batch(turn.pcm)
+        tr.meta["fallback"] = f"batch after {reason}"
+        tr.meta["path"] = "batch"
+        self._emit("stt_fallback", {"reason": reason, "latency_s": round(tr.latency_s, 3)})
+        return tr
 
     async def _transcribe_batch(self, pcm: np.ndarray) -> Transcript:
         """Whole-utterance transcription; a streaming STT may offer a dedicated batch entry point."""

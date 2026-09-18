@@ -89,6 +89,7 @@ class MockStreamingSTT(MockSTT):
         self.segment_samples = 0
         self.commits: list[dict[str, Any]] = []
         self.discards: list[dict[str, Any]] = []
+        self.commit_cancelled: list[float] = []  # perf_counter of each commit() cancelled mid-flight
 
     async def feed(self, pcm: np.ndarray) -> None:
         self.feeds += 1
@@ -98,7 +99,11 @@ class MockStreamingSTT(MockSTT):
     async def commit(self) -> Transcript:
         t0 = time.perf_counter()
         samples, self.segment_samples = self.segment_samples, 0
-        await asyncio.sleep(self.commit_delay_s)
+        try:
+            await asyncio.sleep(self.commit_delay_s)
+        except asyncio.CancelledError:
+            self.commit_cancelled.append(time.perf_counter())
+            raise
         text = self._texts[self._i] if self._i < len(self._texts) else ""
         self._i += 1
         self.commits.append({"samples": samples, "text": text, "t": t0})
