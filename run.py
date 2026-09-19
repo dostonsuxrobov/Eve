@@ -49,6 +49,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--once", metavar="TEXT", help="text mode: speak the reply to this one line, then exit")
     ap.add_argument("--user-name")
     ap.add_argument("--mute-fillers", action="store_true", help="no 'hmm' while thinking")
+    ap.add_argument("--no-greeting", action="store_true", help="don't have her say hello when the session starts")
+    ap.add_argument("--lang", default="en", choices=["en", "ru"], help="language of the opening greeting and fillers (she follows you afterwards)")
     ap.add_argument("--debug", action="store_true", help="verbose logging + every pipeline event")
     return ap.parse_args(argv)
 
@@ -234,9 +236,15 @@ async def amain(args: argparse.Namespace) -> int:
     )
     t0 = time.perf_counter()
     await agent.prepare()
+    if hasattr(agent, "_select_lang"):
+        agent._select_lang(args.lang)
     if fillers:
         n = sum(len(v) for v in fillers.values())
         console.print(f"[dim]{n} fillers pre-rendered in {time.perf_counter() - t0:.2f}s[/]")
+    if not args.no_greeting and not args.once:
+        # She opens the conversation (one short LLM turn) instead of sitting in silence.
+        agent.pending_events.put_nowait({"type": "session_start", "user_name": args.user_name or "", "lang": args.lang})
+        await agent.poll_pending_events()
     console.print("[dim]Ctrl-C to end the session" + (" | type and press Enter; an empty line interrupts her" if args.text else "; headphones recommended for barge-in") + "[/]")
 
     try:
@@ -287,22 +295,37 @@ async def amain(args: argparse.Namespace) -> int:
 
 async def text_session(agent: Any) -> None:
     """Typed input: each line is a turn; an empty line interrupts a reply in progress.
-    Timer events are still delivered while idle."""
+    Timer events are still delivered while idle; the session ends by itself once she has
+    said goodbye (the end_conversation tool)."""
+    ended = asyncio.Event()
 
     async def event_poller() -> None:
-        while True:
+        while not ended.is_set():
             await asyncio.sleep(0.25)
             try:
                 await agent.poll_pending_events()
             except Exception:
                 log.exception("pending event failed")
+            if getattr(agent, "end_requested", False):
+                ended.set()
 
     poller = asyncio.create_task(event_poller())
     say_task: asyncio.Task[Any] | None = None
+    lines = stdin_lines().__aiter__()
     try:
         console.print("[bold cyan]you:[/] ", end="")
-        async for line in stdin_lines():
-            line = line.strip()
+        while not ended.is_set():
+            next_line = asyncio.ensure_future(lines.__anext__())
+            end_wait = asyncio.ensure_future(ended.wait())
+            done, _ = await asyncio.wait({next_line, end_wait}, return_when=asyncio.FIRST_COMPLETED)
+            end_wait.cancel()
+            if next_line not in done:
+                next_line.cancel()
+                break
+            try:
+                line = next_line.result().strip()
+            except StopAsyncIteration:
+                break
             if say_task is not None and not say_task.done():
                 await agent.interrupt("typed")
                 await asyncio.wait({say_task})
@@ -312,6 +335,7 @@ async def text_session(agent: Any) -> None:
         if say_task is not None:
             await asyncio.wait({say_task})
     finally:
+        ended.set()
         poller.cancel()
         if say_task is not None and not say_task.done():
             await agent.interrupt("shutdown")
@@ -339,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.debug else logging.WARNING,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    logging.getLogger("phonemizer").setLevel(logging.ERROR)  # Kokoro G2P "words count mismatch" noise
     if args.list_devices:
         list_devices()
         return 0

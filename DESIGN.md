@@ -14,6 +14,7 @@ eva/
   audio/mic.py       sounddevice input -> asyncio queue of 20 ms int16 frames @16 kHz
   audio/vad.py       Silero VAD (onnxruntime, no torch) + utterance segmenter
   audio/player.py    sounddevice output with instant stop() and played-sample accounting
+  audio/envelope.py  lead-in / fade-in / fade-out / tail shaping of every spoken turn
   stt/…              elevenlabs_scribe.py, faster_whisper_local.py, sherpa_parakeet.py
   llm/openai_compat.py  streaming chat-completions client (Cerebras, Ollama, anything)
   llm/chunker.py     stream text -> TTS-sized sentence chunks (early first chunk)

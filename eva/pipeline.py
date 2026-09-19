@@ -92,6 +92,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 import numpy as np
 
+from .audio.envelope import fade_in, fade_out, silence, split_tail
 from .config import PipelineSettings
 from .delivery import detect_lang, extract_cue, looks_hallucinated, looks_incomplete
 from .interfaces import (
@@ -181,7 +182,10 @@ def _resolve_chunker_factory(settings: PipelineSettings) -> Callable[[], Chunker
     except ImportError:
         log.warning("eva.llm.chunker not available; using StandInChunker from eva.mocks")
         from .mocks import StandInChunker as SentenceChunker  # type: ignore
-    return lambda: SentenceChunker(first_chunk_min_chars=settings.first_chunk_min_chars, min_chunk_chars=6)
+    return lambda: SentenceChunker(
+        first_chunk_min_chars=settings.first_chunk_min_chars,
+        min_chunk_chars=getattr(settings, "min_chunk_chars", 6),
+    )
 
 
 def _resolve_sanitizer() -> Sanitizer:
@@ -453,6 +457,7 @@ class VoiceAgent:
         self._carry_text: str | None = None
         self._pending_utterance: Any | None = None
         self._stopping = False
+        self.end_requested = False  # set by an end_session event (the end_conversation tool)
 
         # streaming STT (feed while the user talks, commit at the endpoint)
         self.stt_streaming = all(callable(getattr(stt, m, None)) for m in ("feed", "commit", "discard"))
@@ -637,6 +642,11 @@ class VoiceAgent:
         try:
             ev = self.pending_events.get_nowait()
         except asyncio.QueueEmpty:
+            return False
+        if isinstance(ev, dict) and ev.get("type") == "end_session":
+            # The goodbye was spoken in the turn that called the tool; now stop the loop.
+            self.end_requested = True
+            self._emit("session_end", {"reason": ev.get("reason") or ""})
             return False
         text = self._event_to_user_text(ev)
         if not text:
@@ -1144,18 +1154,48 @@ class VoiceAgent:
             job.audio.put_nowait(None)
 
     async def _writer_loop(self, turn: _Turn, jobs: "asyncio.Queue[_ChunkJob | None]") -> None:
-        """Strictly ordered playback: chunk i is fully written before chunk i+1 starts."""
+        """Strictly ordered playback: chunk i is fully written before chunk i+1 starts.
+
+        Shapes the turn's envelope (``eva.audio.envelope``): a short lead-in silence and
+        fade-in on the first audio, an optional gap between sentence chunks, and a
+        fade-out plus tail silence after the last chunk. The last ``fade_out_ms`` of
+        audio is held back until the writer knows whether more follows, so the fade
+        lands exactly on the final word.
+        """
+        s, sr = self.settings, self.tts.sample_rate
+        fade_out_ms = getattr(s, "fade_out_ms", 0)
+        held: bytes = b""  # last fade_out_ms of audio not yet written
+        held_job: _ChunkJob | None = None
+        first_write = True
         while True:
             job = await jobs.get()
             if job is None:
+                if held and held_job is not None:
+                    tail_silence = silence(getattr(s, "tail_ms", 0), sr)
+                    self._write_real(turn, held_job, fade_out(held, fade_out_ms, sr) + tail_silence)
                 return
+            gap_ms = getattr(s, "sentence_gap_ms", 0)
+            first_of_job = True
             while True:
                 b = await job.audio.get()
                 if b is None:
                     break
                 while self.player.buffered_seconds > PLAYER_LOOKAHEAD_S:
                     await asyncio.sleep(0.02)
-                self._write_real(turn, job, b)
+                if held and held_job is not None:
+                    gap = silence(gap_ms, sr) if (first_of_job and gap_ms and not job.is_hint) else b""
+                    self._write_real(turn, held_job, held + gap)
+                    held, held_job = b"", None
+                if first_write:
+                    first_write = False
+                    lead = b"" if turn.filler_samples else silence(getattr(s, "lead_in_ms", 0), sr)
+                    b = lead + fade_in(b, getattr(s, "fade_in_ms", 0), sr)
+                first_of_job = False
+                if fade_out_ms:
+                    b, held = split_tail(b, fade_out_ms, sr)
+                    held_job = job
+                if b:
+                    self._write_real(turn, job, b)
                 if not job.play_started.is_set():
                     job.play_started.set()
             if not job.play_started.is_set():
@@ -1419,6 +1459,8 @@ class VoiceAgent:
 
     # ------------------------------------------------------------------ misc
     def _should_stop(self) -> bool:
+        if self.end_requested and self._response is None:
+            return True
         return self.max_turns is not None and self._turns_done >= self.max_turns and self._response is None
 
     def _set_state(self, new: State) -> None:
@@ -1484,6 +1526,14 @@ class VoiceAgent:
             return f"[system: the timer '{label}' just finished - tell the user naturally]"
         if kind == "reminder":
             return f"[system: reminder due: {ev.get('text') or ev.get('label')} - tell the user naturally]"
+        if kind == "session_start":
+            name = ev.get("user_name") or "them"
+            lang = {"ru": "Russian", "en": "English"}.get(str(ev.get("lang") or "en"), "English")
+            return (
+                f"[system: the conversation just started. Say hello to {name} in {lang}, one short "
+                "natural sentence, the way a friend picks up the phone; no 'how can I help', no task "
+                "talk, at most one light question. Then wait for them.]"
+            )
         msg = ev.get("message") or ev.get("text")
         return f"[system: {msg}]" if msg else f"[system: {json.dumps(ev)}]"
 

@@ -41,6 +41,16 @@ Russian reply "[quiet] Ох. Это же прям тяжело..." on the Russia
 Rendered fillers and backchannels are cached under `models/filler_cache/`, so a restart costs
 no TTS credits.
 
+**Openings and endings.** She says hello when the session starts (`--no-greeting` to skip,
+`--lang ru` for a Russian opening) and, when you say you have to go, says goodbye and ends the
+session herself through the `end_conversation` tool. Every reply is shaped by an envelope
+(`eva/audio/envelope.py`): 80 ms of lead-in silence and a 50 ms fade-in before the first word,
+a 100 ms fade-out and 350 ms of tail after the last one, so a reply no longer starts at full
+volume the instant the endpoint fires or stops dead on the last sample. The personas also open
+with a small lead-in ("mm", "okay so") some of the time and land their last sentence instead of
+clipping it. All of it is tunable in `PipelineSettings` (`lead_in_ms`, `fade_in_ms`,
+`fade_out_ms`, `tail_ms`, `sentence_gap_ms`).
+
 ## The seven presets
 
 | preset | STT | LLM | TTS | what it tests |

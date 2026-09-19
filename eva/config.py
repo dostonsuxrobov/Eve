@@ -75,6 +75,15 @@ class PipelineSettings:
     barge_in_min_speech_ms: int = 300  # how long the user must talk to interrupt
     filler_after_ms: int = 900  # play a filler if no agent audio by then (0 = off)
     first_chunk_min_chars: int = 14  # send first TTS chunk early (after a comma) for low TTFA
+    min_chunk_chars: int = 6  # sentences shorter than this are merged into the next chunk
+    # Envelope of a spoken turn (eva.audio.envelope): TTS clips are trimmed hard at both
+    # ends, so without this a reply starts at full volume the instant the endpoint fires
+    # and stops dead on the last sample. Milliseconds; 0 disables a stage.
+    lead_in_ms: int = 80  # silence before the first audio of a reply (skipped after a filler)
+    fade_in_ms: int = 50
+    fade_out_ms: int = 100
+    tail_ms: int = 350  # silence after the last word before she is "listening" again
+    sentence_gap_ms: int = 0  # extra silence between sentence chunks (pace is tuned; leave 0)
     tts_parallelism: int = 2  # sentences synthesized ahead of playback
     input_device: int | None = None
     output_device: int | None = None
@@ -129,7 +138,10 @@ PRESETS: dict[str, Preset] = {
             "first_chunk_model": "eleven_flash_v2_5",
             "mode": "http",
         },
-        settings=PipelineSettings(endpoint_silence_ms=500, filler_after_ms=800, backchannels=True),
+        settings=PipelineSettings(
+            endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
+            first_chunk_min_chars=18, min_chunk_chars=10,
+        ),
     ),
     "maya-v3": Preset(
         name="maya-v3",
@@ -143,7 +155,10 @@ PRESETS: dict[str, Preset] = {
             "model_id": "eleven_v3",
             "mode": "http",
         },
-        settings=PipelineSettings(endpoint_silence_ms=500, filler_after_ms=800, backchannels=True),
+        settings=PipelineSettings(
+            endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
+            first_chunk_min_chars=18, min_chunk_chars=10,
+        ),
     ),
     "maya-fast": Preset(
         name="maya-fast",
@@ -157,7 +172,10 @@ PRESETS: dict[str, Preset] = {
             "model_id": "eleven_flash_v2_5",
             "mode": "http",
         },
-        settings=PipelineSettings(endpoint_silence_ms=500, filler_after_ms=800, backchannels=True),
+        settings=PipelineSettings(
+            endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
+            first_chunk_min_chars=18, min_chunk_chars=10,
+        ),
     ),
     "cloud-fast": Preset(
         name="cloud-fast",

@@ -259,7 +259,27 @@ def open_url(url: str) -> str:
 
 
 # ----------------------------------------------------------------- registry
+def end_conversation(reason: str = "") -> str:
+    """Ask the pipeline to end the session after the current reply (the goodbye)."""
+    pending_events.put_nowait({"type": "end_session", "reason": reason})
+    return "OK: the session ends right after this reply. Say a short, warm goodbye now."
+
+
 _TOOLS: list[Tool] = [
+    Tool(
+        name="end_conversation",
+        description=(
+            "End the conversation. Call this when the user says goodbye, says they have to go, "
+            "or asks you to stop; say your goodbye in the same reply."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"reason": {"type": "string", "description": "Why the conversation ends, a few words."}},
+            "required": [],
+        },
+        fn=end_conversation,
+        spoken_hint=None,
+    ),
     Tool(
         name="get_current_time",
         description="Get the current local date and time. Use when the user asks what time or day it is.",
@@ -347,9 +367,10 @@ def tool_notes(tools: list[Tool] | None = None) -> str:
     # "I've set the timer" without a call; this wording -> 8/8 (temp 0.7 and 0.8).
     return (
         "Tools, and this rule matters most: when they ask for a timer, a reminder or "
-        "note, the weather, the time or to open a link, your reply MUST begin with the "
-        "function call (you may add a short aside like 'one sec'). You physically cannot "
-        "do any of these by talking, so a reply without the call means it did not happen. "
+        "note, the weather, the time or to open a link, or when they say goodbye or that "
+        "they have to go, your reply MUST include the function call (you may add a short "
+        "aside like 'one sec', or the goodbye itself). You physically cannot do any of "
+        "these by talking, so a reply without the call means it did not happen. "
         "The tools:\n" + lines
     )
 
