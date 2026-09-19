@@ -93,6 +93,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 import numpy as np
 
 from .config import PipelineSettings
+from .delivery import detect_lang, extract_cue, looks_hallucinated, looks_incomplete
 from .interfaces import (
     LLM,
     MIC_SAMPLE_RATE,
@@ -296,6 +297,15 @@ def _recover_tool_calls(text: str, tools: list[Tool], seq: list[int]) -> tuple[s
     return _JSON_OBJ_RE.sub(_sub, text), calls
 
 
+def _by_lang(v: "list[str] | dict[str, list[str]] | None") -> dict[str, list[str]]:
+    """Normalise ``["mm", "hmm"]`` or ``{"en": [...], "ru": [...]}`` to a per-language dict."""
+    if not v:
+        return {}
+    if isinstance(v, dict):
+        return {k: [x for x in (vals or []) if x and x.strip()] for k, vals in v.items() if vals}
+    return {"en": [x for x in v if x and x.strip()]}
+
+
 def _as_sentence(text: str) -> str:
     """"one sec" -> "One sec." so hints read and are spoken like a sentence."""
     text = " ".join(text.split())
@@ -322,6 +332,7 @@ class _ChunkJob:
     raw: str  # text as the LLM produced it (for the transcript)
     text: str  # sanitized text sent to TTS ("" -> nothing to say)
     is_hint: bool = False
+    cue: str | None = None  # delivery cue ("warm", "teasing" ...) split off the raw text
     samples: int = 0  # samples written to the player so far
     audio: "asyncio.Queue[bytes | None]" = field(default_factory=asyncio.Queue)
     play_started: asyncio.Event = field(default_factory=asyncio.Event)
@@ -383,10 +394,11 @@ class VoiceAgent:
         frames: AsyncIterator[np.ndarray] | None,
         segmenter: SegmenterLike | None,
         player: PlayerLike,
-        fillers: list[str] | None = None,
+        fillers: "list[str] | dict[str, list[str]] | None" = None,
         on_event: EventHandler | None = None,
         max_turns: int | None = None,
-        tool_hints: list[str] | None = None,
+        tool_hints: "list[str] | dict[str, list[str]] | None" = None,
+        backchannels: "list[str] | dict[str, list[str]] | None" = None,
         chunker_factory: Callable[[], Chunker] | None = None,
         sanitizer: Sanitizer | None = None,
         tool_executor: ToolExecutor | None = None,
@@ -414,11 +426,22 @@ class VoiceAgent:
         self.messages: list[dict[str, Any]] = []  # history without the system prompt
         self.turns: list[TurnMetrics] = []
         self.state = State.LISTENING
-        self._fillers_text = [f for f in (fillers or []) if f and f.strip()]
-        self._tool_hints = [h for h in (tool_hints or []) if h and h.strip()]
+        # Spoken-language handling: fillers, tool hints and backchannels are kept per
+        # language ("en", "ru", ...) and chosen by the language of the user's last turn.
+        self._fillers_by_lang = _by_lang(fillers)
+        self._hints_by_lang = _by_lang(tool_hints)
+        self._backchannels_by_lang = _by_lang(backchannels)
+        self._fillers_text = self._fillers_by_lang.get("en") or next(iter(self._fillers_by_lang.values()), [])
+        self._tool_hints = self._hints_by_lang.get("en") or next(iter(self._hints_by_lang.values()), [])
         self._tool_hint_i = 0
-        self._fillers_audio: list[bytes] = []
+        self._fillers_audio: list[bytes] = []  # audio for the current language (see _select_lang)
+        self._fillers_audio_by_lang: dict[str, list[bytes]] = {}
+        self._backchannel_audio_by_lang: dict[str, list[bytes]] = {}
         self._filler_i = 0
+        self._backchannel_i = 0
+        self._user_lang = "en"
+        self._dip_ms = 0.0
+        self._last_backchannel_t = -1e9
         self._prepared = False
         self._turn_seq = 0
         self._turns_done = 0
@@ -456,15 +479,42 @@ class VoiceAgent:
             return
         self._prepared = True
         self._start_keepalive()
-        for text in self._fillers_text:
-            try:
-                audio = await self._render_to_bytes(text)
-            except Exception as e:  # a broken filler must not stop startup
-                log.warning("filler %r failed to render: %s", text, e)
-                continue
-            if audio:
-                self._fillers_audio.append(audio)
-        self._emit("ready", {"fillers": len(self._fillers_audio)})
+        for lang, texts in self._fillers_by_lang.items():
+            for text in texts:
+                try:
+                    audio = await self._render_to_bytes(text)
+                except Exception as e:  # a broken filler must not stop startup
+                    log.warning("filler %r failed to render: %s", text, e)
+                    continue
+                if audio:
+                    self._fillers_audio_by_lang.setdefault(lang, []).append(audio)
+        if self.settings.backchannels:
+            for lang, texts in self._backchannels_by_lang.items():
+                for text in texts:
+                    try:
+                        audio = await self._render_to_bytes(text)
+                    except Exception as e:
+                        log.warning("backchannel %r failed to render: %s", text, e)
+                        continue
+                    if audio:
+                        self._backchannel_audio_by_lang.setdefault(lang, []).append(audio)
+        self._select_lang(self._user_lang)
+        self._emit(
+            "ready",
+            {
+                "fillers": sum(len(v) for v in self._fillers_audio_by_lang.values()),
+                "backchannels": sum(len(v) for v in self._backchannel_audio_by_lang.values()),
+            },
+        )
+
+    def _select_lang(self, lang: str) -> None:
+        """Switch fillers / hints to ``lang`` (falls back to any language that has them)."""
+        self._user_lang = lang
+        self._fillers_audio = self._fillers_audio_by_lang.get(lang) or next(
+            iter(self._fillers_audio_by_lang.values()), []
+        )
+        self._fillers_text = self._fillers_by_lang.get(lang) or next(iter(self._fillers_by_lang.values()), [])
+        self._tool_hints = self._hints_by_lang.get(lang) or next(iter(self._hints_by_lang.values()), [])
 
     async def run(self) -> list[TurnMetrics]:
         """Main loop: consume mic frames until they end, ``max_turns`` is reached or cancelled."""
@@ -487,6 +537,8 @@ class VoiceAgent:
                     fed |= await self._on_vad_event(ev)
                 if self._stream_open and not fed:
                     await self._stt_feed(frame)
+                if self.settings.backchannels:
+                    self._maybe_backchannel(frame_ms=1000.0 * len(frame) / 16_000)
                 if self._barge_candidate is not None:
                     await self._check_barge_in()
                 if self._should_stop():
@@ -717,6 +769,12 @@ class VoiceAgent:
                     if self._carry_text is None:
                         return  # nothing to answer
                     text = ""  # re-answer the carried question
+                elif await self._user_went_on(turn, text):
+                    # They paused mid-thought and continued: keep the text for merging
+                    # with the next utterance instead of answering half a sentence.
+                    self._carry_text = ((self._carry_text or "") + " " + text).strip()
+                    self._emit("utterance_carried", {"text": self._carry_text, "why": "incomplete"})
+                    return
             else:
                 text = turn.user_text or ""
             text = self._append_user(text)
@@ -738,6 +796,21 @@ class VoiceAgent:
             if self._response is turn:
                 self._response = None
             self._set_state(State.LISTENING)
+
+    async def _user_went_on(self, turn: _Turn, text: str) -> bool:
+        """After an unfinished-looking transcript, wait ``incomplete_grace_ms`` for the user
+        to resume. True if they did (speech detected again) before the grace ran out."""
+        grace = self.settings.incomplete_grace_ms
+        if grace <= 0 or turn.kind != "voice" or self.segmenter is None or not looks_incomplete(text):
+            return False
+        self._emit("stt_incomplete", {"text": text, "grace_ms": grace})
+        deadline = _now() + grace / 1000.0
+        while _now() < deadline:
+            if getattr(self.segmenter, "speaking", False) or self._barge_candidate is not None:
+                self._barge_candidate = None
+                return True
+            await asyncio.sleep(0.02)
+        return False
 
     async def _transcribe(self, turn: _Turn) -> str:
         assert turn.pcm is not None
@@ -764,6 +837,15 @@ class VoiceAgent:
         if len(text) < MIN_TRANSCRIPT_CHARS:
             self._emit("stt_empty", {"text": text})
             return ""
+        reason = looks_hallucinated(text, tr.meta)
+        if reason is not None:
+            # Noise, breaths and fan hum make Whisper-class models invent "Thank you." etc.
+            self._emit("stt_phantom", {"text": text, "reason": reason})
+            return ""
+        lang = detect_lang(text, default=self._user_lang)
+        if lang != self._user_lang:
+            self._select_lang(lang)
+            self._emit("language", {"lang": lang})
         return text
 
     async def _commit_then_batch(self, turn: _Turn) -> Transcript:
@@ -832,6 +914,9 @@ class VoiceAgent:
         return tr
 
     async def _generate_and_speak(self, turn: _Turn) -> None:
+        begin = getattr(self.tts, "begin_turn", None)
+        if callable(begin):
+            begin()  # hybrid first-chunk model + prosodic continuity restart per reply
         schemas = [t.openai_schema() for t in self.tools] or None
         jobs: "asyncio.Queue[_ChunkJob | None]" = asyncio.Queue()
         writer = self._spawn(turn, self._writer_loop(turn, jobs), "eva-writer")
@@ -1012,8 +1097,9 @@ class VoiceAgent:
     def _enqueue(
         self, turn: _Turn, jobs: "asyncio.Queue[_ChunkJob | None]", round_no: int, raw: str, *, is_hint: bool = False
     ) -> None:
-        text = self.sanitizer(raw, self.tts.supports_audio_tags).strip()
-        job = _ChunkJob(index=len(turn.chunks), round=round_no, raw=raw.strip(), text=text, is_hint=is_hint)
+        cue, body = extract_cue(raw)
+        text = self.sanitizer(body, self.tts.supports_audio_tags).strip()
+        job = _ChunkJob(index=len(turn.chunks), round=round_no, raw=raw.strip(), text=text, is_hint=is_hint, cue=cue)
         turn.chunks.append(job)
         if job.silent:
             job.audio.put_nowait(None)
@@ -1029,7 +1115,11 @@ class VoiceAgent:
         try:
             if gate >= 0:
                 await turn.chunks[gate].play_started.wait()
-            async for b in self.tts.synthesize(job.text):
+            if job.cue and getattr(self.tts, "supports_cues", False):
+                stream = self.tts.synthesize(job.text, cue=job.cue)  # type: ignore[call-arg]
+            else:
+                stream = self.tts.synthesize(job.text)
+            async for b in stream:
                 if not b:
                     continue
                 if turn.metrics.tts_first_audio is None:
@@ -1122,6 +1212,46 @@ class VoiceAgent:
         turn.filler_samples += n
         self._set_state(State.SPEAKING)
         self._emit("filler", {"index": self._filler_i - 1, "seconds": round(n / self.tts.sample_rate, 3), "after_s": round(_now() - base, 3)})
+
+    def _maybe_backchannel(self, *, frame_ms: float) -> None:
+        """Play a short "mm-hm" at a natural dip inside a LONG user utterance.
+
+        Conditions: LISTENING with no reply in flight, the user has been speaking for
+        ``backchannel_after_ms``, the VAD probability just dipped below the end
+        threshold for ``backchannel_dip_ms`` (a breath or a comma-pause, not the end of
+        the turn), and the last backchannel was ``backchannel_min_gap_s`` ago. Headphones
+        recommended: through speakers the sound reaches the mic and the STT.
+        """
+        seg = self.segmenter
+        audio_list = self._backchannel_audio_by_lang.get(self._user_lang) or next(
+            iter(self._backchannel_audio_by_lang.values()), []
+        )
+        if not audio_list or seg is None or self.state is not State.LISTENING or self._response is not None:
+            self._dip_ms = 0.0
+            return
+        prob = getattr(seg, "last_prob", None)
+        if not getattr(seg, "speaking", False) or prob is None:
+            self._dip_ms = 0.0
+            return
+        if getattr(seg, "speaking_ms", 0.0) < self.settings.backchannel_after_ms:
+            return
+        end_thr = getattr(seg, "end_threshold", None)
+        if end_thr is None:
+            end_thr = max(float(seg.threshold) - 0.15, 0.02)
+        if prob < end_thr:
+            self._dip_ms += frame_ms
+        else:
+            self._dip_ms = 0.0
+            return
+        now = _now()
+        if self._dip_ms < self.settings.backchannel_dip_ms or now - self._last_backchannel_t < self.settings.backchannel_min_gap_s:
+            return
+        audio = audio_list[self._backchannel_i % len(audio_list)]
+        self._backchannel_i += 1
+        self._last_backchannel_t = now
+        self._dip_ms = 0.0
+        self.player.write(audio)
+        self._emit("backchannel", {"index": self._backchannel_i - 1, "seconds": round(len(audio) / 2 / self.tts.sample_rate, 2)})
 
     def _hint_for(self, tool_calls: list[LLMToolCall]) -> str | None:
         """What to say while a tool runs: the tool's own hint, else a persona tool
@@ -1314,10 +1444,35 @@ class VoiceAgent:
             log.exception("on_event(%s) failed", name)
 
     async def _render_to_bytes(self, text: str) -> bytes:
+        """Render a filler / backchannel, cached on disk per (tts name, text) so a restart
+        costs no TTS credits. Cache dir: ``models/filler_cache`` (gitignored)."""
+        import hashlib
+
+        from .config import MODELS_DIR
+
+        cache_dir = MODELS_DIR / "filler_cache"
+        key = hashlib.sha1(f"{self.tts.name}|{self.tts.sample_rate}|{text}".encode("utf-8")).hexdigest()
+        path = cache_dir / f"{key}.pcm"
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                return path.read_bytes()
+        except OSError:
+            pass
+        begin = getattr(self.tts, "begin_turn", None)
+        if callable(begin):
+            begin()
         fn = getattr(self.tts, "synthesize_to_bytes", None)
         if fn is not None:
-            return bytes(await fn(text))
-        return b"".join([b async for b in self.tts.synthesize(text)])
+            audio = bytes(await fn(text))
+        else:
+            audio = b"".join([b async for b in self.tts.synthesize(text)])
+        if audio:
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(audio)
+            except OSError as e:
+                log.debug("filler cache write failed: %s", e)
+        return audio
 
     @staticmethod
     def _event_to_user_text(ev: Any) -> str:

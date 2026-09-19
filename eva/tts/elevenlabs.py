@@ -48,6 +48,7 @@ from websockets.asyncio.client import ClientConnection, connect as ws_connect
 from websockets.protocol import State
 
 from ..config import USER_AGENT
+from ..delivery import cue_settings, detect_lang, strip_tags
 
 API_HOST = "api.elevenlabs.io"
 HTTP_BASE = f"https://{API_HOST}"
@@ -158,12 +159,33 @@ class ElevenLabsTTS:
         keepalive_s: float = 12.0,
         timeout_s: float = 30.0,
         optimize_streaming_latency: int | None = 3,
+        voices_by_lang: dict[str, str] | None = None,
+        first_chunk_model: str | None = None,
+        continuity: bool = True,
     ) -> None:
+        """
+        voices_by_lang: optional ``{"ru": voice_id, ...}``; each synthesize() call picks the
+            voice by the script of its text (``eva.delivery.detect_lang``), falling back
+            to ``voice_id``. Only honoured in http mode (the pooled websocket is bound to
+            one voice).
+        first_chunk_model: optional model used for the FIRST chunk after ``begin_turn()``
+            (e.g. ``eleven_flash_v2_5`` under ``eleven_v3``): fast onset, expressive rest.
+        continuity: pass ``previous_text`` / ``previous_request_ids`` within a turn so
+            consecutive sentences keep one prosodic line instead of restarting each time.
+        """
         if mode not in ("ws", "http"):
             raise ValueError(f"mode must be 'ws' or 'http', got {mode!r}")
         self.api_key = api_key
         self.voice_id = voice_id
         self.model_id = model_id
+        self.voices_by_lang = {k.lower(): v for k, v in (voices_by_lang or {}).items()}
+        self.first_chunk_model = first_chunk_model
+        self.continuity = continuity
+        self.supports_cues: bool = True  # synthesize(text, cue=...) maps cues to settings
+        # Per-turn continuity state (reset by begin_turn()).
+        self._turn_chunk = 0
+        self._prev_text: str | None = None
+        self._prev_ids: list[tuple[str, str]] = []  # (model_id, request_id) of recent chunks
         self.requested_mode = mode
         self.mode = mode  # effective mode; may flip to "http" on fallback
         self.supports_audio_tags: bool = model_id.startswith("eleven_v3")
@@ -187,9 +209,14 @@ class ElevenLabsTTS:
         self._closed = False
 
     # ------------------------------------------------------------------ settings
-    def voice_settings(self) -> dict[str, Any]:
-        """The ``voice_settings`` object sent to the API (model-aware)."""
-        if self.supports_audio_tags:  # eleven_v3: stability presets only
+    def voice_settings(self, model_id: str | None = None, cue: str | None = None) -> dict[str, Any]:
+        """The ``voice_settings`` object sent to the API (model-aware, cue-aware).
+
+        A delivery ``cue`` only changes settings on tag-less models; v3 receives the cue
+        inline as a tag instead.
+        """
+        model_id = model_id or self.model_id
+        if model_id.startswith("eleven_v3"):  # eleven_v3: stability presets only
             stab = DEFAULT_V3_STABILITY if self._stability is None else self._stability
             stab = min(V3_STABILITY_PRESETS, key=lambda p: abs(p - stab))
             vs: dict[str, Any] = {
@@ -208,7 +235,23 @@ class ElevenLabsTTS:
             vs["speed"] = self._speed
         if self._speaker_boost is not None:
             vs["use_speaker_boost"] = self._speaker_boost
+        if cue and not model_id.startswith("eleven_v3"):
+            vs = cue_settings(cue, vs)
         return vs
+
+    # ---------------------------------------------------------------- per turn
+    def begin_turn(self) -> None:
+        """Start a new reply: the next chunk is the turn's first (hybrid model, no continuity)."""
+        self._turn_chunk = 0
+        self._prev_text = None
+        self._prev_ids = []
+
+    def voice_for(self, text: str) -> str:
+        """Voice id for ``text`` by script (``voices_by_lang``), default ``voice_id``."""
+        if not self.voices_by_lang:
+            return self.voice_id
+        lang = detect_lang(text, default="")
+        return self.voices_by_lang.get(lang, self.voice_id)
 
     # ------------------------------------------------------------------- public
     async def warmup(self) -> None:
@@ -229,9 +272,14 @@ class ElevenLabsTTS:
                 return
         await self._warm_http()
 
-    def synthesize(self, text: str) -> AsyncIterator[bytes]:
-        """Stream int16 PCM chunks for ``text`` (see module docstring for modes)."""
-        return self._synthesize(text)
+    def synthesize(self, text: str, *, cue: str | None = None) -> AsyncIterator[bytes]:
+        """Stream int16 PCM chunks for ``text`` (see module docstring for modes).
+
+        ``cue`` is a delivery cue from ``eva.delivery`` (``"warm"``, ``"teasing"`` ...):
+        on Flash/Turbo it becomes voice settings for this chunk; on v3 it is prepended
+        as an inline tag if the text does not already start with one.
+        """
+        return self._synthesize(text, cue=cue)
 
     async def synthesize_to_bytes(self, text: str) -> bytes:
         """Render ``text`` completely (for pre-rendering fillers)."""
@@ -261,14 +309,27 @@ class ElevenLabsTTS:
         self.fallback_reason = reason
         self.name = f"elevenlabs/{self.model_id}/{self.voice_id}/http(fallback)"
 
-    async def _synthesize(self, text: str) -> AsyncIterator[bytes]:
+    async def _synthesize(self, text: str, *, cue: str | None = None) -> AsyncIterator[bytes]:
         if self._closed:
             raise RuntimeError("ElevenLabsTTS is closed")
         self.calls += 1
         if not text.strip():
             self.last = SynthStats(mode=self.mode, ttfa_s=None, total_s=0.0)
             return
-        if self.mode == "ws":
+        chunk_no = self._turn_chunk
+        self._turn_chunk += 1
+        model_id = self.model_id
+        if chunk_no == 0 and self.first_chunk_model:
+            model_id = self.first_chunk_model
+        voice_id = self.voice_for(text) if self.mode == "http" else self.voice_id
+        if model_id.startswith("eleven_v3"):
+            if cue and not text.lstrip().startswith("["):
+                text = f"[{cue}] {text}"
+        else:
+            text = strip_tags(text) or text  # a tag-less model would read "[warm]" aloud
+        if not text.strip():
+            return
+        if self.mode == "ws" and model_id == self.model_id and voice_id == self.voice_id and cue is None:
             try:
                 async with contextlib.aclosing(self._synthesize_ws(text)) as gen:
                     async for chunk in gen:
@@ -276,7 +337,7 @@ class ElevenLabsTTS:
                 return
             except _WSRejected as exc:
                 self._fallback(str(exc))
-        async for chunk in self._synthesize_http(text):
+        async for chunk in self._synthesize_http(text, model_id=model_id, voice_id=voice_id, cue=cue):
             yield chunk
 
     # ---------------------------------------------------------------------- HTTP
@@ -305,32 +366,73 @@ class ElevenLabsTTS:
         with contextlib.suppress(httpx.HTTPError):
             await client.options(self._http_path())
 
-    def _http_path(self) -> str:
-        return f"/v1/text-to-speech/{self.voice_id}/stream"
+    def _http_path(self, voice_id: str | None = None) -> str:
+        return f"/v1/text-to-speech/{voice_id or self.voice_id}/stream"
 
-    def _http_params(self) -> dict[str, Any]:
+    def _http_params(self, model_id: str | None = None) -> dict[str, Any]:
+        model_id = model_id or self.model_id
         params: dict[str, Any] = {"output_format": OUTPUT_FORMAT}
         # eleven_v3 answers HTTP 400 if optimize_streaming_latency is present.
-        if self._osl is not None and not self.supports_audio_tags:
+        if self._osl is not None and not model_id.startswith("eleven_v3"):
             params["optimize_streaming_latency"] = self._osl
         return params
 
-    async def _synthesize_http(self, text: str) -> AsyncIterator[bytes]:
+    async def _synthesize_http(
+        self,
+        text: str,
+        *,
+        model_id: str | None = None,
+        voice_id: str | None = None,
+        cue: str | None = None,
+    ) -> AsyncIterator[bytes]:
         client = self._http_client()
-        body = {"text": text, "model_id": self.model_id, "voice_settings": self.voice_settings()}
+        model_id = model_id or self.model_id
+        voice_id = voice_id or self.voice_id
+        body: dict[str, Any] = {
+            "text": text,
+            "model_id": model_id,
+            "voice_settings": self.voice_settings(model_id, cue),
+        }
+        if self.continuity and not model_id.startswith("eleven_v3"):
+            # Prosodic continuity across the sentences of one reply. Request ids are only
+            # reused for the same model, and eleven_v3 accepts neither previous_text nor
+            # previous_request_ids yet (HTTP 400 unsupported_model, verified 2026-09-18).
+            if self._prev_text:
+                body["previous_text"] = self._prev_text[-300:]
+            ids = [rid for m, rid in self._prev_ids if m == model_id][-3:]
+            if ids:
+                body["previous_request_ids"] = ids
         t0 = time.perf_counter()
-        stats = SynthStats(mode="http")
+        stats = SynthStats(mode="http", extra={"model_id": model_id, "voice_id": voice_id, "cue": cue})
         carry = bytearray()
-        async with client.stream("POST", self._http_path(), params=self._http_params(), json=body) as resp:
+        async with client.stream(
+            "POST", self._http_path(voice_id), params=self._http_params(model_id), json=body
+        ) as resp:
             if resp.status_code != 200:
                 raw = await resp.aread()
+                msg = _err_message(raw)
+                if resp.status_code == 400 and "previous_" in msg and (
+                    "previous_text" in body or "previous_request_ids" in body
+                ):
+                    # This model does not take continuity fields: retry once without them
+                    # and stop sending them for the rest of the session.
+                    self.continuity = False
+                    body.pop("previous_text", None)
+                    body.pop("previous_request_ids", None)
+                    async for out in self._synthesize_http(text, model_id=model_id, voice_id=voice_id, cue=cue):
+                        yield out
+                    return
                 raise ElevenLabsError(
                     resp.status_code,
-                    _err_message(raw),
+                    msg,
                     mode="http",
-                    model_id=self.model_id,
+                    model_id=model_id,
                     code=_err_code(raw),
                 )
+            rid = resp.headers.get("request-id")
+            if rid:
+                self._prev_ids = (self._prev_ids + [(model_id, rid)])[-6:]
+            self._prev_text = text
             async for data in resp.aiter_bytes():
                 out = _even(data, carry)
                 if not out:

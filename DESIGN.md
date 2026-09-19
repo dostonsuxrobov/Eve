@@ -24,6 +24,7 @@ eva/
   tools.py           small tool registry (time, timer, notes, weather, open url/app)
   memory.py          tiny persistent facts store + end-of-session summariser
   pipeline.py        the conversation loop: VAD -> STT -> LLM -> chunker -> TTS -> player
+  delivery.py        delivery cues ([warm]...), EN/RU detection, phantom-transcript and unfinished-turn heuristics
 run.py               CLI entry: `python run.py --preset cloud-fast --persona eva`
 bench/               latency.py, conversation_eval.py, e2e_sim.py
 ```

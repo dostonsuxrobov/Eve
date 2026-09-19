@@ -11,12 +11,9 @@ from __future__ import annotations
 import re
 
 # Audio tags ElevenLabs v3 renders and we allow through when the TTS supports them.
-AUDIO_TAG_WHITELIST: frozenset[str] = frozenset(
-    {
-        "laughs", "laughing", "chuckles", "sighs", "exhales", "gasps", "whispers", "pause",
-        "clears throat", "sniffs", "giggles",
-    }
-)
+# Tags a tag-capable TTS (ElevenLabs v3) may receive inline: the non-verbal sounds plus
+# the delivery cues from eva.delivery ([warm], [teasing], ...). Everything else is dropped.
+from ..delivery import V3_TAG_WHITELIST as AUDIO_TAG_WHITELIST  # noqa: E402
 
 # Words that, alone inside *asterisks* or (parentheses), are stage directions, not emphasis.
 _STAGE_VERBS = frozenset(

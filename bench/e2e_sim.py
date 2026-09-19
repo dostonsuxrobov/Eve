@@ -1090,8 +1090,9 @@ async def run_real(args: argparse.Namespace) -> int:
     stt, llm, tts = build_stt(preset.stt, keys), build_llm(preset.llm, keys), build_tts(tts_cfg, keys)
 
     persona_name = args.persona or preset.persona
-    fillers: list[str] = []
-    tool_hints: list[str] = []
+    fillers: "list[str] | dict[str, list[str]]" = []
+    tool_hints: "list[str] | dict[str, list[str]]" = []
+    backchannels: dict[str, list[str]] = {}
     try:
         from eva.tools import get_tools
         from eva.tools import tool_notes as _tool_notes
@@ -1117,8 +1118,9 @@ async def run_real(args: argparse.Namespace) -> int:
         from eva.personas import load_persona, render
 
         persona = load_persona(persona_name)
-        fillers = list(persona.fillers)
-        tool_hints = [h for h in (getattr(persona, "tool_hints", None) or []) if isinstance(h, str)]
+        fillers = persona.fillers_by_lang()
+        tool_hints = persona.tool_hints_by_lang()
+        backchannels = persona.backchannels_by_lang() if settings.backchannels else {}
         system_prompt = render(
             persona,
             supports_audio_tags=tts.supports_audio_tags,
@@ -1126,6 +1128,7 @@ async def run_real(args: argparse.Namespace) -> int:
             now=datetime.now().strftime("%A %d %B %Y, %H:%M"),
             user_name=args.user_name or "",
             tool_notes=_tool_notes(tools),
+            delivery_cues=bool(getattr(tts, "supports_cues", False)),
         )
     except Exception as e:
         console.print(f"[yellow]eva.personas unavailable ({escape(repr(e))}); using a basic prompt[/]")
@@ -1158,8 +1161,8 @@ async def run_real(args: argparse.Namespace) -> int:
 
     agent = VoiceAgent(
         stt, llm, tts, system_prompt, tools, settings,
-        frames=mic.frames(), segmenter=segmenter, player=player, fillers=fillers, tool_hints=tool_hints, on_event=log,
-        max_turns=args.max_turns,
+        frames=mic.frames(), segmenter=segmenter, player=player, fillers=fillers, tool_hints=tool_hints,
+        backchannels=backchannels, on_event=log, max_turns=args.max_turns,
     )
     t0 = time.perf_counter()
     await agent.prepare()

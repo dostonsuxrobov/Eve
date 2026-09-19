@@ -11,6 +11,36 @@ measured on one Windows 11 laptop (RTX 4050 6 GB, Python 3.13). Not built for sc
 `DESIGN.md` has the architecture notes and the hard-won environment facts; `docs/EVAL_REPORT.md`
 is the conversation-quality evaluation that picked the default brain and persona.
 
+## The Maya-like presets (start here)
+
+```
+.venv\Scripts\python.exe run.py --preset maya --persona eva --user-name Doston
+```
+
+`maya` is the best combination of everything measured so far, built around two ElevenLabs
+voices picked by hand (`eva_en` = `QLAlOeRuLwKX0skeTR7R`, `eva_ru` = `yMBZR4SLoc24wOJLWAB2`):
+
+| piece | choice | why |
+|---|---|---|
+| ears | ElevenLabs Scribe v2 realtime, batch fallback | streams while you talk; auto-detects English / Russian |
+| brain | Cerebras qwen-3.8-27b, low reasoning | the eval winner: real emotional reads, honest about tools, 0.2-0.5 s to first token |
+| mouth | ElevenLabs v3 with delivery tags, Flash for the first chunk | v3 is the most expressive model but 0.65-0.85 s to first audio; Flash opens the reply in ~0.2 s, v3 carries the rest |
+| voice switch | per sentence by script | Cyrillic -> `eva_ru`, Latin -> `eva_en`; fillers and tool asides switch too |
+| delivery cues | `[warm] [soft] [teasing] [excited] ...` | the brain starts about every other sentence with one cue; v3 renders it, Flash maps it to stability / style / speed |
+| continuity | `previous_text` + `previous_request_ids` | consecutive sentences keep one prosodic line on Flash / Turbo (v3 does not accept these fields yet) |
+| turn taking | 500 ms endpoint + "unfinished sentence" grace | a transcript that trails off ("...and", "потому что,") waits 600 ms for you to go on and is merged, no wasted LLM call |
+| backchannels | "mm-hm" / "угу" at a breath inside a long story | headphones recommended; off in the other presets |
+| noise gate | VAD 0.6 + phantom-transcript filter | the fully-local preset used to answer fan noise with "Thank you." |
+
+Variants to compare by ear: `maya-v3` (every chunk on v3, most expressive, ~0.5 s slower to
+start) and `maya-fast` (Flash only, fastest, cues become voice settings). Measured on the run
+that shipped this (one English and one Russian utterance, STT in its slow state for the
+Russian one): English 1.53 s from endpoint to first audio (STT 0.61, LLM 0.56, TTS 0.36),
+Russian reply "[quiet] Ох. Это же прям тяжело..." on the Russian voice.
+
+Rendered fillers and backchannels are cached under `models/filler_cache/`, so a restart costs
+no TTS credits.
+
 ## The seven presets
 
 | preset | STT | LLM | TTS | what it tests |

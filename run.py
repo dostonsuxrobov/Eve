@@ -176,9 +176,11 @@ async def amain(args: argparse.Namespace) -> int:
         now=datetime.now().strftime("%A %d %B %Y, %H:%M"),
         user_name=args.user_name or "",
         tool_notes=_tool_notes(tools),
+        delivery_cues=bool(getattr(tts, "supports_cues", False)),
     )
-    fillers = [] if args.mute_fillers else list(persona.fillers)
-    tool_hints = [h for h in (getattr(persona, "tool_hints", None) or []) if isinstance(h, str)]
+    fillers = {} if args.mute_fillers else persona.fillers_by_lang()
+    tool_hints = persona.tool_hints_by_lang()
+    backchannels = persona.backchannels_by_lang() if settings.backchannels else {}
 
     # Open the audio devices BEFORE any network warmup: a missing/denied microphone
     # should fail fast without spending API calls or leaving warmup tasks dangling.
@@ -227,12 +229,14 @@ async def amain(args: argparse.Namespace) -> int:
         player=player,
         fillers=fillers,
         tool_hints=tool_hints,
+        backchannels=backchannels,
         on_event=StatusPrinter(debug=args.debug),
     )
     t0 = time.perf_counter()
     await agent.prepare()
     if fillers:
-        console.print(f"[dim]{len(fillers)} fillers pre-rendered in {time.perf_counter() - t0:.2f}s[/]")
+        n = sum(len(v) for v in fillers.values())
+        console.print(f"[dim]{n} fillers pre-rendered in {time.perf_counter() - t0:.2f}s[/]")
     console.print("[dim]Ctrl-C to end the session" + (" | type and press Enter; an empty line interrupts her" if args.text else "; headphones recommended for barge-in") + "[/]")
 
     try:

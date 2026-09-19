@@ -31,14 +31,31 @@ from pathlib import Path
 PERSONAS_DIR = Path(__file__).resolve().parent / "personas"
 DEFAULT_PERSONA = "eva"
 
-TEMPLATE_SLOTS = ("user_name", "now", "memory", "audio_tags_rule", "tool_notes")
+TEMPLATE_SLOTS = ("user_name", "now", "memory", "audio_tags_rule", "tool_notes", "language_rule")
 _SLOT_RE = re.compile(r"\{(" + "|".join(TEMPLATE_SLOTS) + r")\}")
 
 AUDIO_TAGS_ALLOWED = (
-    "Audio tags. Your voice can render a few bracketed sounds, so you may use "
-    "[laughs], [chuckles], [sighs], [exhales], [whispers] or [pause], sparingly, only "
-    "where a real person would actually make that sound. At most one per reply, never "
-    "two in a row, never as a substitute for words, and no other bracketed text."
+    "Delivery. Your voice renders bracketed tags, so you shape HOW each sentence sounds. "
+    "You may start a sentence with exactly one delivery cue from this list and no other: "
+    "[warm] [soft] [gentle] [quiet] [sad] [thoughtful] [slow] [bright] [playful] [teasing] "
+    "[excited] [curious] [amused] [serious]. Use a cue on roughly one sentence in two, "
+    "chosen for the feeling behind the words, and vary them; a reply is not a list of tags. "
+    "Sounds are allowed too, only where a real person would make them: [laughs], [chuckles], "
+    "[sighs], [exhales], [whispers], [pause], at most one sound per reply, never as a "
+    "substitute for words. Never write any other bracketed text."
+)
+DELIVERY_CUES_ONLY = (
+    "Delivery. You can shape HOW a sentence sounds by starting it with exactly one cue from "
+    "this list and no other: [warm] [soft] [gentle] [quiet] [sad] [thoughtful] [slow] "
+    "[bright] [playful] [teasing] [excited] [curious] [amused] [serious]. The cue is never "
+    "spoken; it only changes the voice. Use one on roughly one sentence in two, chosen for the "
+    "feeling behind the words, and vary them. Never write sound tags like [laughs] or [sighs] "
+    "or any other bracketed text; show those through words and rhythm."
+)
+LANGUAGE_RULE = (
+    "Language. Answer in the language {user_name} just used. In Russian, talk the way a close "
+    "friend talks: informal, natural spoken Russian, short sentences, no anglicisms and no "
+    "translated-sounding phrasing; if they switch languages, switch with them without comment."
 )
 AUDIO_TAGS_FORBIDDEN = (
     "Audio tags. Never write bracketed stage directions or sound tags like [laughs] or "
@@ -63,7 +80,20 @@ class Persona:
     suggested_voice: str
     fillers: list[str] = field(default_factory=list)
     tool_hints: list[str] = field(default_factory=list)
+    fillers_ru: list[str] = field(default_factory=list)
+    tool_hints_ru: list[str] = field(default_factory=list)
+    backchannels: list[str] = field(default_factory=list)
+    backchannels_ru: list[str] = field(default_factory=list)
     template: str = ""
+
+    def fillers_by_lang(self) -> dict[str, list[str]]:
+        return {k: v for k, v in {"en": self.fillers, "ru": self.fillers_ru}.items() if v}
+
+    def tool_hints_by_lang(self) -> dict[str, list[str]]:
+        return {k: v for k, v in {"en": self.tool_hints, "ru": self.tool_hints_ru}.items() if v}
+
+    def backchannels_by_lang(self) -> dict[str, list[str]]:
+        return {k: v for k, v in {"en": self.backchannels, "ru": self.backchannels_ru}.items() if v}
 
     def slots_present(self) -> set[str]:
         """Which of the five template slots this template actually uses."""
@@ -100,6 +130,10 @@ def load_persona(name: str = DEFAULT_PERSONA) -> Persona:
         suggested_voice=str(meta.get("suggested_voice") or "sarah"),
         fillers=_as_list(meta.get("fillers")),
         tool_hints=_as_list(meta.get("tool_hints")),
+        fillers_ru=_as_list(meta.get("fillers_ru")),
+        tool_hints_ru=_as_list(meta.get("tool_hints_ru")),
+        backchannels=_as_list(meta.get("backchannels")),
+        backchannels_ru=_as_list(meta.get("backchannels_ru")),
         template=body.strip() + "\n",
     )
 
@@ -173,6 +207,7 @@ def render(
     now: str | None = None,
     user_name: str | None = None,
     tool_notes: str | None = None,
+    delivery_cues: bool = False,
 ) -> str:
     """Fill the persona template and return the final system prompt.
 
@@ -181,12 +216,20 @@ def render(
     Empty or ``None`` ``memory_text`` / ``tool_notes`` / ``user_name`` / ``now`` get
     sensible fallbacks so the prompt never contains a dangling empty section.
     """
+    if supports_audio_tags:
+        delivery = AUDIO_TAGS_ALLOWED  # v3: cues AND sounds inline
+    elif delivery_cues:
+        delivery = DELIVERY_CUES_ONLY  # flash/turbo: cues mapped to voice settings
+    else:
+        delivery = AUDIO_TAGS_FORBIDDEN
+    name = (user_name or "").strip() or "your friend"
     values = {
-        "user_name": (user_name or "").strip() or "your friend",
+        "user_name": name,
         "now": (now or "").strip() or now_string(),
         "memory": (memory_text or "").strip() or NO_MEMORY_TEXT,
-        "audio_tags_rule": AUDIO_TAGS_ALLOWED if supports_audio_tags else AUDIO_TAGS_FORBIDDEN,
+        "audio_tags_rule": delivery,
         "tool_notes": (tool_notes or "").strip() or NO_TOOLS_TEXT,
+        "language_rule": LANGUAGE_RULE.replace("{user_name}", name),
     }
     return _SLOT_RE.sub(lambda m: values[m.group(1)], persona.template)
 

@@ -31,6 +31,9 @@ EL_VOICES: dict[str, str] = {
     "matilda": "XrExE9yKIg1WjnnlVkGX",
     "lily": "pFZP5JQG7iQjIQuC4Bku",
     # "jessica" (cgSgspJ2msm6clMXDiKS) returns 404 voice_not_found on this key; removed.
+    # Voices the user picked for the Maya-like preset (verified on this key, flash + v3):
+    "eva_en": "QLAlOeRuLwKX0skeTR7R",
+    "eva_ru": "yMBZR4SLoc24wOJLWAB2",
 }
 
 
@@ -61,9 +64,11 @@ def load_keys() -> Keys:
 class PipelineSettings:
     """Turn-taking and smoothness knobs. Defaults tuned for a natural feel."""
 
-    vad_threshold: float = 0.5
+    # 0.5 / 200 ms let laptop fan and keyboard noise through as "speech", which Whisper
+    # then turned into phantom sentences; 0.6 / 250 ms is quiet in a normal room.
+    vad_threshold: float = 0.6
     endpoint_silence_ms: int = 550  # silence after speech that ends the user's turn
-    min_speech_ms: int = 200  # ignore blips shorter than this
+    min_speech_ms: int = 250  # ignore blips shorter than this
     prespeech_buffer_ms: int = 300  # audio kept before VAD fires so we don't clip onsets
     max_utterance_s: float = 30.0
     barge_in: bool = True
@@ -74,6 +79,16 @@ class PipelineSettings:
     input_device: int | None = None
     output_device: int | None = None
     echo_guard: bool = True  # raise VAD threshold while speaking when not using headphones
+    # Backchannels ("mm-hm") at natural dips inside a long user utterance. Off by default:
+    # through speakers the sound reaches the mic; with headphones it feels alive.
+    backchannels: bool = False
+    backchannel_after_ms: int = 4000  # the user must have been talking this long
+    backchannel_dip_ms: int = 240  # VAD below the end threshold for this long = a breath/pause
+    backchannel_min_gap_s: float = 8.0
+    # If the transcript looks unfinished ("...and then," / no final punctuation), wait this
+    # long for the user to go on before answering; if they do, the pieces are merged into
+    # one turn and no LLM call is wasted. 0 = off.
+    incomplete_grace_ms: int = 600
 
 
 @dataclass
@@ -96,6 +111,54 @@ class Preset:
 # max_tokens is raised to 800 on the reasoning presets so that a long think can never
 # leave the reply empty (finish=length with 400 was measured 2/82 turns).
 PRESETS: dict[str, Preset] = {
+    # ---- the Maya-like family: user-picked voices, EN/RU switching, delivery cues ----
+    "maya": Preset(
+        name="maya",
+        description=(
+            "Best effort at Maya: Scribe realtime STT, Cerebras qwen-3.8-27b, ElevenLabs v3 with "
+            "delivery tags on the eva_en / eva_ru voices, Flash for the first chunk so the reply "
+            "starts fast, prosodic continuity between sentences, backchannels (headphones)."
+        ),
+        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
+        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
+        tts={
+            "kind": "elevenlabs",
+            "voice": "eva_en",
+            "voices_by_lang": {"ru": "eva_ru"},
+            "model_id": "eleven_v3",
+            "first_chunk_model": "eleven_flash_v2_5",
+            "mode": "http",
+        },
+        settings=PipelineSettings(endpoint_silence_ms=500, filler_after_ms=800, backchannels=True),
+    ),
+    "maya-v3": Preset(
+        name="maya-v3",
+        description="maya with every chunk on ElevenLabs v3 (most expressive, ~0.5 s slower to start).",
+        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
+        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
+        tts={
+            "kind": "elevenlabs",
+            "voice": "eva_en",
+            "voices_by_lang": {"ru": "eva_ru"},
+            "model_id": "eleven_v3",
+            "mode": "http",
+        },
+        settings=PipelineSettings(endpoint_silence_ms=500, filler_after_ms=800, backchannels=True),
+    ),
+    "maya-fast": Preset(
+        name="maya-fast",
+        description="maya on ElevenLabs Flash only: fastest; delivery cues become voice settings per sentence.",
+        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
+        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
+        tts={
+            "kind": "elevenlabs",
+            "voice": "eva_en",
+            "voices_by_lang": {"ru": "eva_ru"},
+            "model_id": "eleven_flash_v2_5",
+            "mode": "http",
+        },
+        settings=PipelineSettings(endpoint_silence_ms=500, filler_after_ms=800, backchannels=True),
+    ),
     "cloud-fast": Preset(
         name="cloud-fast",
         description="ElevenLabs Scribe realtime STT + Cerebras qwen-3.8-27b (low reasoning) + ElevenLabs Flash. Lowest cloud latency.",

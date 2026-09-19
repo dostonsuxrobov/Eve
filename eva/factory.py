@@ -114,6 +114,7 @@ def build_tts(cfg: dict[str, Any], keys: Keys) -> TTS:
         assert keys.elevenlabs, "ElevenLabs key missing"
         voice = cfg.get("voice", "sarah")
         voice_id = EL_VOICES.get(voice, voice)  # allow a raw voice id
+        by_lang = {k: EL_VOICES.get(v, v) for k, v in (cfg.get("voices_by_lang") or {}).items()}
         return ElevenLabsTTS(
             api_key=keys.elevenlabs,
             voice_id=voice_id,
@@ -123,6 +124,9 @@ def build_tts(cfg: dict[str, Any], keys: Keys) -> TTS:
             similarity_boost=cfg.get("similarity_boost"),
             style=cfg.get("style"),
             speed=cfg.get("speed"),
+            voices_by_lang=by_lang or None,
+            first_chunk_model=cfg.get("first_chunk_model"),
+            continuity=cfg.get("continuity", True),
         )
     if kind == "kokoro":
         from .tts.kokoro_local import KokoroTTS
