@@ -20,6 +20,7 @@ USER_AGENT = "eva-voice-agent/0.1"
 # before falling back. Always use the IPv4 literal.
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # ElevenLabs premade voice IDs (the key lacks voices_read, so we hardcode).
 EL_VOICES: dict[str, str] = {
@@ -51,12 +52,14 @@ def _read_key(filename: str, env: str) -> str | None:
 class Keys:
     cerebras: str | None
     elevenlabs: str | None
+    openai: str | None = None
 
 
 def load_keys() -> Keys:
     return Keys(
         cerebras=_read_key("cerebras_api_key.txt", "CEREBRAS_API_KEY"),
         elevenlabs=_read_key("elevenlabs_key.txt", "ELEVENLABS_API_KEY"),
+        openai=_read_key("openAI_api.txt", "OPENAI_API_KEY"),
     )
 
 
@@ -117,22 +120,23 @@ class Preset:
     tts_fallback: dict[str, Any] | None = None
 
 
-# The brains. Cerebras "reasoning" values (mapped by eva.factory.build_llm):
-#   "low" / "medium" / "high" -> reasoning_effort. gpt-oss-120b always reasons; low is its
-#       fastest setting.
-#   "none" (or None / "off")  -> disable_reasoning: true (qwen only). Fastest content TTFT
-#       (0.29 s vs 0.43 s median) but qwen-3.8-27b then ends 25-40 % of very short replies
-#       mid-word ("That stings a") and the broken text cascades through the history
-#       (docs/EVAL_REPORT.md section 6). Set it only if you accept that.
-# max_tokens is 800 on the reasoning brains so a long think can never leave the reply empty
-# (finish=length with 400 was measured 2/82 turns).
+# The three brains that won their metric in docs/EVAL_REPORT.md (sections 3 and 10); every
+# other candidate measured (gpt-oss-120b, qwen3:4b, qwen2.5-coder:7b, gpt-5.4-nano,
+# gpt-5.6-luna / -terra) is recorded there and lives in git history.
+#   Cerebras "reasoning": "low" / "medium" / "high" -> reasoning_effort. "none" ->
+#       disable_reasoning (faster first token, but qwen then truncates 25-40 % of very short
+#       replies mid-word, section 6). max_tokens 800 so a long think never empties the reply.
+#   OpenAI "reasoning": "none" (gpt-5.1+) / "minimal" (gpt-5.0): no thinking before a reply.
+#   Ollama brains run on the native API with thinking off (eva/llm/ollama_native.py).
 BRAINS: dict[str, dict[str, Any]] = {
-    # the eval winner (docs/EVAL_REPORT.md: 6.00/10, passes every honesty check, 0.2-0.4 s TTFT)
+    # speed + honesty: 6.2/10, 6/6 tools, 0.30 s TTFT, ~$0.003 per exchange. The default.
     "qwen": {"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
-    # bigger, but 3.50/10 in the eval: promises tools it lacks, leaks tool calls as JSON text
-    "gpt-oss": {"kind": "cerebras", "model": "gpt-oss-120b", "reasoning": "low", "max_tokens": 800},
-    # the on-device brain: the fallback when Cerebras is unreachable, and the `local` preset
-    "local": {"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M"},
+    # conversation: 8.0/10 ("That stings a bit, even if you're pretending it doesn't"), 0.49 s TTFT,
+    # the tersest replies; costs real money per turn (about 2k prompt tokens each)
+    "gpt": {"kind": "openai", "model": "gpt-5.4-mini", "reasoning": "none"},
+    # on-device: 3.7/10 as a companion but 6/6 on tool calls with correct arguments, 0.18 s
+    # TTFT; the `local` preset and the fallback brain when Cerebras is unreachable
+    "local": {"kind": "ollama", "model": "qwen3:8b"},
 }
 DEFAULT_BRAIN = "qwen"
 
@@ -140,36 +144,49 @@ DEFAULT_BRAIN = "qwen"
 LOCAL_STT: dict[str, Any] = {"kind": "parakeet"}
 LOCAL_TTS: dict[str, Any] = {"kind": "kokoro", "voice": "af_heart"}
 
-PRESETS: dict[str, Preset] = {
-    "maya": Preset(
-        name="maya",
-        description=(
-            "The cloud stack: Scribe realtime STT, Cerebras qwen-3.8-27b, ElevenLabs v3 with "
-            "delivery tags on the eva_en / eva_ru voices, Flash for the first chunk so the reply "
-            "starts fast, prosodic continuity between sentences, backchannels (headphones). "
-            "Falls back to Parakeet / Ollama qwen3:4b / Kokoro when a cloud service stops answering."
-        ),
-        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
-        llm=dict(BRAINS[DEFAULT_BRAIN]),
-        tts={
-            "kind": "elevenlabs",
-            "voice": "eva_en",  # per-language voices come from eva/assets/lang/*.toml
-            "model_id": "eleven_v3",
-            "first_chunk_model": "eleven_flash_v2_5",
-        },
-        settings=PipelineSettings(
-            endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
-            first_chunk_min_chars=18, min_chunk_chars=10,
-        ),
+_MAYA_STT: dict[str, Any] = {"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"}
+_MAYA_TTS: dict[str, Any] = {
+    "kind": "elevenlabs",
+    "voice": "eva_en",  # per-language voices come from eva/assets/lang/*.toml
+    "model_id": "eleven_v3",
+    "first_chunk_model": "eleven_flash_v2_5",
+}
+_MAYA_SETTINGS = PipelineSettings(
+    endpoint_silence_ms=500, filler_after_ms=800, backchannels=True, first_chunk_min_chars=18, min_chunk_chars=10,
+)
+_MAYA_EARS_AND_VOICE = (
+    "Scribe realtime STT, ElevenLabs v3 with delivery tags on the eva_en / eva_ru voices, Flash for "
+    "the first chunk so the reply starts fast, prosodic continuity between sentences, backchannels "
+    "(headphones). Falls back to Parakeet / Ollama qwen3:8b / Kokoro when a cloud service stops answering."
+)
+
+
+def _maya(name: str, brain: str, blurb: str) -> Preset:
+    """The Maya stack with one of the three brains; same ears and voice, so what differs is the brain."""
+    return Preset(
+        name=name,
+        description=f"{blurb} {_MAYA_EARS_AND_VOICE}",
+        stt=dict(_MAYA_STT),
+        llm=dict(BRAINS[brain]),
+        tts=dict(_MAYA_TTS),
+        settings=_MAYA_SETTINGS,
         stt_fallback=dict(LOCAL_STT),
         llm_fallback=dict(BRAINS["local"]),
         tts_fallback=dict(LOCAL_TTS),
-    ),
+    )
+
+
+# Three versions of the same agent, one per brain (docs/EVAL_REPORT.md sections 3 and 10), plus
+# the fully offline stack. `--brain` can still override any preset's brain.
+PRESETS: dict[str, Preset] = {
+    "maya": _maya("maya", "qwen", "Brain: Cerebras qwen-3.8-27b (6.2/10, 0.30 s to first token, about $0.003 per exchange)."),
+    "maya-gpt": _maya("maya-gpt", "gpt", "Brain: OpenAI gpt-5.4-mini, reasoning off (8.0/10, 0.49 s, about $0.0005-0.002 per exchange)."),
+    "maya-local": _maya("maya-local", "local", "Brain: Ollama qwen3:8b on this laptop, thinking off (3.7/10 as a companion, 6/6 on tools, free)."),
     "local": Preset(
         name="local",
         description=(
-            "Everything on this laptop: Parakeet TDT 0.6B (sherpa-onnx) STT, Ollama qwen3:4b, "
-            "Kokoro TTS. Free, private, offline; a 2-3/10 conversation (docs/EVAL_REPORT.md)."
+            "Everything on this laptop: Parakeet TDT 0.6B (sherpa-onnx) STT, Ollama qwen3:8b, "
+            "Kokoro TTS. Free, private, offline; tools work, the conversation is 3.7/10 (docs/EVAL_REPORT.md)."
         ),
         stt=dict(LOCAL_STT),
         llm=dict(BRAINS["local"]),

@@ -449,3 +449,36 @@ Default persona: keep `eva` as `DEFAULT_PERSONA`; expose `calm_coach` as the low
 * After-fix with `reasoning_effort: low`, eva + calm_coach, all 10: `bench/out/rerun_fixed_reasoning_low/`
 * After-fix spot check of gpt-oss-120b and ollama 4B on their failure scenarios: `bench/out/rerun_fixed_otherbrains/`
 * Rewritten prompts: `eva/personas/eva.md`, `calm_coach.md`, `maya_like.md`, `witty_companion.md`
+
+## 10. Addendum 2026-09-19 (evening): local 8B, the coder 7B, and OpenAI candidates
+
+Same ten scenarios, the rewritten `eva` persona, `max_tokens` 800, reasoning off everywhere it
+can be. Lens scores in this section are one judge (the assistant that ran the bench) reading the
+full transcripts with the section-2 lenses; the automatic metrics are from the bench itself.
+Tool column: `bench/tool_probe.py` (six turns with Eva's real tool schemas: two tools in one
+request, time, weather, goodbye, and two turns where no tool applies).
+
+| brain | EI | SN | TH | mean | tools | warm TTFT median | notes |
+|---|---|---|---|---|---|---|---|
+| ollama `qwen3:4b-instruct-2507` (baseline, section 3) | 2 | 2.5 | 1.5 | 2.0 | 3/6 | 0.07 s | says "setting that timer" and calls nothing |
+| ollama `qwen2.5-coder:7b` | 2 | 3 | 2 | 2.3 | 3/6 | 0.20 s | help-desk register; invents the time and the weather instead of calling; writes the lie first ask |
+| ollama `qwen3:8b` (native API, `think: false`) | 3 | 5 | 3 | 3.7 | **6/6** | 0.18 s (1.3 s with tools) | correct tool calls with correct arguments; but "that's a relief" to the forgotten birthday, invents the weather and Miso's antics, "Eight minutes, got it" with no tool |
+| cerebras `qwen-3.8-27b` (the default) | 6 | 5.5 | 7 | 6.2 | 6/6 | 0.30 s | section 3; honest, terse, real reads |
+| openai `gpt-5.4-nano` (`reasoning_effort: none`) | 6 | 5 | 7 | 6.0 | 5/6 | 0.50 s | a question every turn; sick-pet reply turns into instructions; answered an English turn in Russian once in the probe |
+| openai `gpt-5.4-mini` (`none`) | 8 | 8 | 8 | **8.0** | 5/6 | 0.49 s | "That stings a bit, even if you're pretending it doesn't"; "Rough day's got teeth"; sick pet in eight words; 19.5 words per reply |
+| openai `gpt-5.6-luna` (`none`) | 8 | 7 | 8 | 7.7 | 6/6 | 0.47 s | remembers the sister; "fair point, I was slow there"; a little wordier, sick-pet reply carries instructions |
+| openai `gpt-5.6-terra` (`none`) | – | – | – | – | 6/6 | 0.64 s | probe only (cost unknown); best-written probe replies ("sand in the gears") |
+
+The 5/6 of nano and mini on tools is the goodbye turn: they called `end_conversation` without
+saying goodbye (the pipeline then asks for one); luna and terra say goodbye and call. Every
+OpenAI model produced correct arguments (`seconds: 480`, `city: Philadelphia`).
+
+What it says: (1) below ~8B nothing on this laptop passes the honesty lens, and the 8B passes
+the *tool-calling* half while failing the *judgement* half, so a local model is a tool executor,
+not the companion; (2) at the same speed class as Cerebras (0.5 vs 0.3 s), `gpt-5.4-mini` and
+`gpt-5.6-luna` outscore the 27B by about two points on conversation, and their cost per turn
+(84 k prompt tokens per 41-turn run here) is the deciding number, not their quality.
+
+Ollama note: hybrid Qwen3 models only stop thinking through the native `/api/chat` `think`
+field (`eva/llm/ollama_native.py`); `/v1/chat/completions` ignores it and the `/no_think`
+prompt switch (measured: 736 thinking tokens per "hi").

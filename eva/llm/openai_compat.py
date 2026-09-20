@@ -191,18 +191,22 @@ class OpenAICompatLLM:
         model: str,
         extra_body: dict[str, Any] | None = None,
         max_tokens: int = 400,
-        temperature: float = 0.8,
+        temperature: float | None = 0.8,
         *,
+        token_param: str = "max_tokens",
         connect_timeout: float = 5.0,
         read_timeout: float = 60.0,
         keepalive_expiry: float = 120.0,
     ) -> None:
+        """``token_param`` is ``max_completion_tokens`` for OpenAI's reasoning models, which
+        reject ``max_tokens``; ``temperature=None`` omits the field (they reject that too)."""
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.extra_body = dict(extra_body or {})
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.token_param = token_param
         self._supports_stream_options: bool | None = None  # unknown until first stream
         self.warmup_s: float | None = None
         self._client = httpx.AsyncClient(
@@ -228,10 +232,11 @@ class OpenAICompatLLM:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
+            self.token_param: self.max_tokens,
             "stream": stream,
         }
+        if self.temperature is not None:
+            body["temperature"] = self.temperature
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
@@ -252,11 +257,8 @@ class OpenAICompatLLM:
         """Establish the (TLS) keep-alive connection with a 1-token completion."""
         t0 = time.perf_counter()
         try:
-            await self.complete(
-                [{"role": "user", "content": "hi"}],
-                max_tokens=1,
-                temperature=0.0,
-            )
+            # 16 tokens, not 1: OpenAI's gpt-5 family answers HTTP 400 when the limit cuts the reply
+            await self.complete([{"role": "user", "content": "hi"}], max_tokens=16)
         except Exception as e:  # warmup must never crash the pipeline
             log.warning("%s warmup failed: %s", self.name, e)
         self.warmup_s = time.perf_counter() - t0
@@ -289,6 +291,8 @@ class OpenAICompatLLM:
         ``temperature``, ``tools`` ...).  ``<think>`` blocks are stripped.
         """
         tools = kw.pop("tools", None)
+        if "max_tokens" in kw and self.token_param != "max_tokens":
+            kw[self.token_param] = kw.pop("max_tokens")
         body = self._body(messages, tools, stream=False, overrides=kw)
         last_exc: Exception | None = None
         for attempt in range(2):

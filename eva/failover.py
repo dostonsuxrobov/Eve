@@ -37,7 +37,7 @@ log = logging.getLogger("eva.failover")
 EventHandler = Callable[[str, dict[str, Any]], None]
 _OWN = frozenset({"primary", "backup", "health", "active", "sample_rate", "name"})  # never proxied
 
-DEFAULT_COOLDOWN_S = 20.0  # short: a transient tail must not park a minute of talk on the 4B model
+DEFAULT_COOLDOWN_S = 20.0  # short: a transient tail must not park a minute of talk on the local model
 LLM_FIRST_TOKEN_TIMEOUT_S = 5.0  # Cerebras cold-connection tail is 2-3 s; 5 s is "not answering"
 STT_TIMEOUT_S = 6.0  # the pipeline's own commit deadline (2.5 s+) runs first; this bounds the batch retry
 TTS_FIRST_BYTE_TIMEOUT_S = 4.0  # v3 first audio is 0.5-0.9 s, Flash 0.2 s
