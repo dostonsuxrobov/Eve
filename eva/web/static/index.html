@@ -95,59 +95,60 @@
     }
     registerProcessor("cap", Cap);`;
   const playWorklet = `
+    // Her audio arrives as 24 kHz int16 network messages. They are appended to ONE continuous ring
+    // buffer and resampled to the device rate here, sample by sample across message boundaries, so
+    // a boundary is never audible (resampling each message on its own left a click ~12x per second:
+    // the "bad line" heard on the phone). A jitter buffer on top: hold "pre" seconds before a reply
+    // starts and "re" seconds before resuming after running dry; "eot" or 400 ms without new data
+    // drains whatever is held. All counts below are in INPUT (24 kHz) samples.
     class Play extends AudioWorkletProcessor {
-      // A jitter buffer: hold "pre" seconds before a reply starts, and after the queue runs dry
-      // mid-reply hold "re" seconds before resuming, so a Wi-Fi hiccup is one short pause instead
-      // of a stutter. "eot" (end of the reply) or 400 ms without new data drains whatever is held.
-      constructor() { super(); this.q = []; this.off = 0; this.queued = 0; this.played = 0; this.tone = 0; this.lp = 0;
-        this.pre = 0.35 * sampleRate; this.re = 0.2 * sampleRate; this.need = this.pre; this.playing = false;
-        this.drain = false; this.lastData = 0; this.underruns = 0; this.lastStat = 0;
+      constructor() { super();
+        this.inRate = 24000; this.cap = this.inRate * 30; this.buf = new Float32Array(this.cap);
+        this.w = 0; this.r = 0.0; this.consumed = 0;             // write count, fractional read position, samples played since flush
+        this.pre = 0.35 * this.inRate; this.re = 0.2 * this.inRate; this.need = this.pre; this.playing = false;
+        this.drain = false; this.lastData = 0; this.underruns = 0; this.lastStat = 0; this.tone = 0; this.lp = 0; this.last = 0;
         this.port.onmessage = (e) => { const m = e.data;
-          if (m.flush) { this.q = []; this.off = 0; this.queued = 0; this.playing = false; this.need = this.pre; this.drain = false;
-                         this.port.postMessage({ stopped: true, played: this.played }); this.played = 0; }
+          if (m.flush) { this.port.postMessage({ stopped: true, played: Math.floor(this.consumed) }); this.r = this.w; this.consumed = 0; this.playing = false; this.need = this.pre; this.drain = false; }
           else if (m.eot) { this.drain = true; }
-          else if (m.prebuffer !== undefined) { this.pre = m.prebuffer * sampleRate; this.re = Math.min(this.pre, 0.6 * m.prebuffer * sampleRate); this.need = this.pre; }
-          else if (m.roomTone !== undefined) { this.tone = m.roomTone === null ? 0 : Math.pow(10, m.roomTone / 20) * 3.8; /* uniform noise through the 0.35 one-pole has rms 0.266 */ }
-          else if (m.pcm) { const a = new Float32Array(m.pcm); this.q.push(a); this.queued += a.length; this.lastData = currentTime; this.drain = false; } };
+          else if (m.inRate) { this.inRate = m.inRate; }
+          else if (m.prebuffer !== undefined) { this.pre = m.prebuffer * this.inRate; this.re = Math.min(this.pre, 0.6 * this.pre); this.need = this.pre; }
+          else if (m.roomTone !== undefined) { this.tone = m.roomTone === null ? 0 : Math.pow(10, m.roomTone / 20) * 3.8; }
+          else if (m.pcm) { const a = new Int16Array(m.pcm);
+            if (this.w - this.r + a.length > this.cap) { this.r = this.w; }              // absurdly far behind: skip ahead
+            for (let k = 0; k < a.length; k++) { this.buf[this.w % this.cap] = a[k] / 32768; this.w++; }
+            this.lastData = currentTime; this.drain = false; } };
       }
+      get queued() { return Math.max(0, this.w - this.r); }
       process(inputs, outputs) {
-        const out = outputs[0][0]; let i = 0;
+        const out = outputs[0][0]; const step = this.inRate / sampleRate; let i = 0;
         if (!this.playing && this.queued > 0) {
           const stale = currentTime - this.lastData > 0.4;
           if (this.queued >= this.need || this.drain || stale) this.playing = true;
         }
         if (this.playing) {
-          while (i < out.length && this.q.length) {
-            const head = this.q[0]; const take = Math.min(out.length - i, head.length - this.off);
-            out.set(head.subarray(this.off, this.off + take), i); i += take; this.off += take; this.played += take; this.queued -= take;
-            if (this.off >= head.length) { this.q.shift(); this.off = 0; }
+          for (; i < out.length; i++) {
+            if (this.w - this.r < 2) break;                                                   // need two samples to interpolate
+            const i0 = Math.floor(this.r), f = this.r - i0;
+            const a = this.buf[i0 % this.cap], b = this.buf[(i0 + 1) % this.cap];
+            out[i] = a + (b - a) * f; this.last = out[i]; this.r += step; this.consumed += step;
           }
-          if (i < out.length) {  // ran dry
-            if (this.drain) { this.playing = false; this.need = this.pre; this.drain = false; }        // the reply is over
-            else { this.playing = false; this.need = this.re; this.underruns++;                     // a hiccup: rebuffer briefly
-                   if (this.underruns % 3 === 0 && this.pre < 0.6 * sampleRate) this.pre *= 1.5;   // and grow the prebuffer if it keeps happening
+          if (i < out.length) {                                                                // ran dry
+            if (this.drain) { this.playing = false; this.need = this.pre; this.drain = false; this.r = this.w; }   // the reply is over
+            else { this.playing = false; this.need = this.re; this.underruns++;                          // a hiccup: rebuffer briefly
+                   if (this.underruns % 3 === 0 && this.pre < 0.6 * this.inRate) this.pre *= 1.5;
                    this.port.postMessage({ underrun: this.underruns }); }
+            // ease the last sample down instead of stepping to the floor
+            for (let k = 0; i < out.length && k < 64; i++, k++) { this.last *= 0.92; out[i] = this.last; }
           }
         }
         for (; i < out.length; i++) { this.lp += 0.35 * ((Math.random() * 2 - 1) - this.lp); out[i] = this.lp * this.tone; }
-        if (currentTime - this.lastStat > 0.5) { this.lastStat = currentTime; this.port.postMessage({ stats: { queued: this.queued / sampleRate, underruns: this.underruns, pre: this.pre / sampleRate } }); }
+        if (currentTime - this.lastStat > 0.5) { this.lastStat = currentTime; this.port.postMessage({ stats: { queued: this.queued / this.inRate, underruns: this.underruns, pre: this.pre / this.inRate } }); }
         return true;
       }
     }
     registerProcessor("play", Play);`;
   const blobUrl = (code) => URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
 
-  // 24 kHz int16 -> float at the context rate (linear), done here so the worklet just plays
-  function toContextRate(int16) {
-    const src = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) src[i] = int16[i] / 32768;
-    if (ctx.sampleRate === outRate) return src;
-    const ratio = outRate / ctx.sampleRate, n = Math.floor(src.length / ratio);
-    const out = new Float32Array(n);
-    for (let i = 0; i < n; i++) { const p = i * ratio, j = Math.floor(p), f = p - j; out[i] = src[j] + (src[Math.min(j + 1, src.length - 1)] - src[j]) * f; }
-    return out;
-  }
-  let carry = new Int16Array(0);  // keep 24 kHz sample continuity across messages for the resampler
 
   async function start() {
     startBtn.disabled = true; setStatus("asking for the mic...");
@@ -180,16 +181,14 @@
     };
     ws.onmessage = (e) => {
       if (typeof e.data === "string") { onEvent(JSON.parse(e.data)); return; }
-      const merged = new Int16Array(carry.length + e.data.byteLength / 2); merged.set(carry); merged.set(new Int16Array(e.data), carry.length);
-      const f = toContextRate(merged); carry = new Int16Array(0);
-      playNode.port.postMessage({ pcm: f.buffer }, [f.buffer]);
+      playNode.port.postMessage({ pcm: e.data }, [e.data]);  // raw 24 kHz int16; the worklet resamples continuously
     };
     ws.onclose = () => { running = false; setStatus("disconnected"); stopBtn.disabled = true; endBtn.disabled = true; startBtn.disabled = false; startBtn.textContent = "Reconnect"; if (stream) stream.getTracks().forEach(t => t.stop()); };
     ws.onerror = () => setStatus("connection failed");
   }
 
   function onEvent(m) {
-    if (m.type === "config") { outRate = m.sampleRate; if (playNode) { playNode.port.postMessage({ roomTone: m.roomToneDbfs === undefined ? null : m.roomToneDbfs }); if (m.prebufferS) playNode.port.postMessage({ prebuffer: m.prebufferS }); } return; }
+    if (m.type === "config") { outRate = m.sampleRate; if (playNode) { playNode.port.postMessage({ inRate: m.sampleRate }); playNode.port.postMessage({ roomTone: m.roomToneDbfs === undefined ? null : m.roomToneDbfs }); if (m.prebufferS) playNode.port.postMessage({ prebuffer: m.prebufferS }); } return; }
     if (m.type === "eot") { if (playNode) playNode.port.postMessage({ eot: true }); return; }
     if (m.type === "pong") { rtt = performance.now() - m.t; rtts.push(rtt); if (rtts.length > 10) rtts.shift(); adaptHold(); showStats(); return; }
     if (m.type === "stop") { playNode.port.postMessage({ flush: true }); return; }
