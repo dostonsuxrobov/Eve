@@ -46,6 +46,11 @@ class Player:
         # (eva.audio.echo) correlates mic frames against this.
         self.played_history_s = 2.0
         self._history: deque[tuple[float, bytes]] = deque()
+        # Idle fill: room tone at this level instead of digital zero (None = zeros), so the
+        # background does not switch on and off with her replies and the amp never sleeps.
+        self.room_tone_dbfs: float | None = None
+        self._tone: np.ndarray | None = None
+        self._tone_pos = 0
 
     # -- lifecycle -------------------------------------------------------------------
     @staticmethod
@@ -165,7 +170,26 @@ class Player:
         if samples:
             outdata[:samples, 0] = np.frombuffer(chunk[: samples * 2], dtype=np.int16)
         if samples < frames:
-            outdata[samples:, 0] = 0
+            outdata[samples:, 0] = self._idle_fill(frames - samples)
+
+    def _idle_fill(self, n: int) -> np.ndarray | int:
+        """Room tone for ``n`` samples of idle output, or 0 (zeros)."""
+        if self.room_tone_dbfs is None:
+            return 0
+        if self._tone is None:
+            from .envelope import room_tone
+
+            self._tone = np.frombuffer(room_tone(2000, self.sample_rate, self.room_tone_dbfs), dtype=np.int16)
+        out = np.empty(n, dtype=np.int16)
+        pos = self._tone_pos
+        filled = 0
+        while filled < n:
+            take = min(n - filled, self._tone.size - pos)
+            out[filled : filled + take] = self._tone[pos : pos + take]
+            filled += take
+            pos = (pos + take) % self._tone.size
+        self._tone_pos = pos
+        return out
 
     # -- producer API --------------------------------------------------------------------
     def write(self, pcm: bytes | bytearray | memoryview | np.ndarray) -> None:

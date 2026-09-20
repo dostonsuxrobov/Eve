@@ -60,6 +60,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--web", action="store_true", help="serve the phone/browser client instead of using this machine's mic and speakers")
     ap.add_argument("--port", type=int, help="port for --web (default 8080, or 8443 with --tls)")
     ap.add_argument("--tls", action="store_true", help="--web over https with a self-signed certificate (browsers need it for the mic)")
+    ap.add_argument("--echo-gates", choices=["auto", "on", "off"], default="auto",
+                    help="the speaker-echo defences (words-confirmed barge-in, echo detector, echo gate): auto = on for this machine's mic, off for --web")
     ap.add_argument("--debug", action="store_true", help="verbose logging + every pipeline event")
     return ap.parse_args(argv)
 
@@ -100,6 +102,7 @@ class StatusPrinter:
             )
         elif name == "web_ready":
             console.print(f"[bold green]open on your phone:[/] [bold]{data['url']}[/]   [dim](this machine: {data['local']})[/]")
+            console.print(f"[dim]echo gates {'on' if data.get('echo_gates') else 'off (the phone cancels its own echo)'}[/]")
             if data.get("tls"):
                 console.print("[dim]self-signed certificate: accept the browser warning once (Safari: Show details -> visit this website);"
                               " Chrome on Android: install " + data["url"] + "/cert.pem or use chrome://flags/#unsafely-treat-insecure-origin-as-secure[/]")
@@ -204,6 +207,8 @@ async def amain(args: argparse.Namespace) -> int:
         settings.output_device = args.output_device
     if args.mute_fillers:
         settings.filler_after_ms = 0
+    if args.echo_gates == "off":
+        settings.barge_in_confirm, settings.echo_detector, settings.self_echo_gate = "vad", False, False
     keys = load_keys()
 
     console.print(f"[bold]Eva[/] preset [cyan]{preset.name}[/]: {preset.description}")
@@ -228,7 +233,8 @@ async def amain(args: argparse.Namespace) -> int:
         try:
             await serve_web(
                 session, settings, port=port, tls=args.tls, user_name=args.user_name or "",
-                greeting=not args.no_greeting, printer=printer,
+                greeting=not args.no_greeting, echo_gates={"auto": None, "on": True, "off": False}[args.echo_gates],
+                printer=printer,
             )
         except asyncio.CancelledError:
             pass
@@ -248,6 +254,7 @@ async def amain(args: argparse.Namespace) -> int:
     from eva.audio.player import Player
 
     player = Player(tts.sample_rate, device=settings.output_device)
+    player.room_tone_dbfs = settings.room_tone_dbfs
     player.start()
     mic = None
     segmenter = None

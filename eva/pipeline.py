@@ -93,7 +93,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 import numpy as np
 
 from .audio.echo import EchoDetector
-from .audio.envelope import fade_in, fade_out, silence, split_tail
+from .audio.envelope import fade_in, fade_out, room_tone, split_tail
 from .config import PipelineSettings
 from .delivery import (
     detect_lang,
@@ -359,6 +359,7 @@ class _Turn:
     audio_started: bool = False
     user_appended: bool = False
     hint_spoken: str | None = None
+    reply_cue: str | None = None  # the first delivery cue of the reply; every later chunk inherits it
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     rounds_in_history: int = 0  # assistant tool-call messages already appended
     recovered_seq: list[int] = field(default_factory=lambda: [0])  # ids for recovered tool calls
@@ -991,11 +992,16 @@ class VoiceAgent:
             # "Uh." / "Hmm.": thinking, not a turn. Answering it is the "ignoring me" feel.
             self._emit("stt_hesitation", {"text": text})
             return ""
-        if self._last_spoken and self._last_audio_end is not None:
+        if self.settings.self_echo_gate and self._last_spoken and self._last_audio_end is not None:
             started = turn.metrics.speech_start if turn.metrics.speech_start is not None else turn.started_at
             near = started - self._last_audio_end < ECHO_WINDOW_S
             during = self._audible_since is not None and started >= self._audible_since - 0.2
-            if (near or during) and looks_like_echo(text, self._last_spoken, min_words=2, fuzzy=ECHO_PARTIAL_SIM):
+            # fuzzy matching only for an utterance that began while she was playing: after she
+            # stopped, a short reply that repeats her words is an answer, not echo
+            echo = (during and looks_like_echo(text, self._last_spoken, min_words=2, fuzzy=ECHO_PARTIAL_SIM)) or (
+                near and looks_like_echo(text, self._last_spoken)
+            )
+            if echo:
                 # the mic heard her own reply through the speakers (echo canceller still converging)
                 self._note_echo("stt_echo", {"text": text, "spoken": self._last_spoken})
                 return ""
@@ -1263,6 +1269,12 @@ class VoiceAgent:
         self, turn: _Turn, jobs: "asyncio.Queue[_ChunkJob | None]", round_no: int, raw: str, *, is_hint: bool = False
     ) -> None:
         cue, body = extract_cue(raw)
+        if is_hint:
+            cue = None
+        elif cue is None:
+            cue = turn.reply_cue  # one voice for the whole reply: a chunk without a cue must not reset it
+        elif turn.reply_cue is None:
+            turn.reply_cue = cue
         text = self.sanitizer(body, self.tts.supports_audio_tags).strip()
         if text and not _SPEAKABLE_RE.search(text):
             text = ""  # brace / punctuation debris ("} }"): nothing to say, and ElevenLabs answers 400
@@ -1321,6 +1333,8 @@ class VoiceAgent:
         """
         s, sr = self.settings, self.tts.sample_rate
         fade_out_ms = getattr(s, "fade_out_ms", 0)
+        edge_ms = getattr(s, "chunk_edge_ms", 0)
+        tone = getattr(s, "room_tone_dbfs", None)
         held: bytes = b""  # last fade_out_ms of audio not yet written
         held_job: _ChunkJob | None = None
         first_write = True
@@ -1328,8 +1342,8 @@ class VoiceAgent:
             job = await jobs.get()
             if job is None:
                 if held and held_job is not None:
-                    tail_silence = silence(getattr(s, "tail_ms", 0), sr)
-                    self._write_real(turn, held_job, fade_out(held, fade_out_ms, sr) + tail_silence)
+                    tail = room_tone(getattr(s, "tail_ms", 0), sr, tone)
+                    self._write_real(turn, held_job, fade_out(held, fade_out_ms, sr) + tail)
                 return
             gap_ms = getattr(s, "sentence_gap_ms", 0)
             first_of_job = True
@@ -1340,12 +1354,15 @@ class VoiceAgent:
                 while self.player.buffered_seconds > PLAYER_LOOKAHEAD_S:
                     await asyncio.sleep(0.02)
                 if held and held_job is not None:
-                    gap = silence(gap_ms, sr) if (first_of_job and gap_ms and not job.is_hint) else b""
-                    self._write_real(turn, held_job, held + gap)
+                    # a chunk boundary: soften both hot edges (v3 clips start and end at -30..-40 dBFS)
+                    gap = room_tone(gap_ms, sr, tone) if (first_of_job and gap_ms and not job.is_hint) else b""
+                    self._write_real(turn, held_job, fade_out(held, edge_ms, sr) + gap)
                     held, held_job = b"", None
+                    if first_of_job:
+                        b = fade_in(b, edge_ms, sr)
                 if first_write:
                     first_write = False
-                    lead = b"" if turn.filler_samples else silence(getattr(s, "lead_in_ms", 0), sr)
+                    lead = b"" if turn.filler_samples else room_tone(getattr(s, "lead_in_ms", 0), sr, tone)
                     b = lead + fade_in(b, getattr(s, "fade_in_ms", 0), sr)
                 first_of_job = False
                 if fade_out_ms:
@@ -1702,9 +1719,9 @@ class VoiceAgent:
             name = ev.get("user_name") or "them"
             lang = str(ev.get("language") or {"ru": "Russian", "en": "English"}.get(str(ev.get("lang") or "en"), "English"))
             return (
-                f"[system: the conversation just started. Say hello to {name} in {lang}, one short "
-                "natural sentence, the way a friend picks up the phone; no 'how can I help', no task "
-                "talk, at most one light question. Then wait for them.]"
+                f"[system: the conversation just started. Say hello to {name} in {lang} the way you "
+                "greet someone you talk to every day: one short, unhurried sentence in your own words, "
+                "no 'how can I help', no task talk, no question needed. Then wait for them.]"
             )
         msg = ev.get("message") or ev.get("text")
         return f"[system: {msg}]" if msg else f"[system: {json.dumps(ev)}]"

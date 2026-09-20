@@ -120,6 +120,7 @@ class WebPlayer:
         self.echo_max_lag_s = 0.8  # network + jitter buffer: wider than the local player's window
         self.reported_played: int | None = None  # the browser's own count after the last stop
         self.latency_s = TRANSPORT_LATENCY_S
+        self.room_tone_dbfs: float | None = None  # sent to the page: its idle fill level
 
     # -- sending ---------------------------------------------------------------------
     def _post(self, payload: str | bytes) -> None:
@@ -137,7 +138,7 @@ class WebPlayer:
 
     # -- PlayerLike ------------------------------------------------------------------
     def start(self) -> None:
-        self._post(json.dumps({"type": "config", "sampleRate": self.sample_rate}))
+        self._post(json.dumps({"type": "config", "sampleRate": self.sample_rate, "roomToneDbfs": self.room_tone_dbfs}))
 
     def write(self, pcm: bytes | bytearray | memoryview | np.ndarray) -> None:
         if self._closed:

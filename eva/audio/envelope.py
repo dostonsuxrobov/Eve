@@ -18,6 +18,25 @@ def silence(ms: float, sample_rate: int) -> bytes:
     return bytes(n * 2)
 
 
+_rng = np.random.default_rng(7)
+
+
+def room_tone(ms: float, sample_rate: int, dbfs: float | None) -> bytes:
+    """``ms`` of faint, soft (low-passed) noise at ``dbfs``; digital silence when ``dbfs`` is None.
+
+    TTS clips carry their own floor; gaps of digital zero between them make the background
+    switch on and off with every reply. A constant bed at the clips' own floor hides that.
+    """
+    n = max(0, int(round(sample_rate * ms / 1000.0)))
+    if n == 0 or dbfs is None:
+        return bytes(n * 2)
+    x = _rng.standard_normal(n + 8).astype(np.float32)
+    x = np.convolve(x, np.ones(8, dtype=np.float32) / 8.0, mode="valid")[:n]  # gentle low-pass
+    rms = float(np.sqrt((x * x).mean())) or 1.0
+    x *= (32767.0 * 10 ** (dbfs / 20.0)) / rms
+    return x.astype(np.int16).tobytes()
+
+
 def _ramp(n: int) -> np.ndarray:
     """Raised-cosine ramp 0 -> 1 over ``n`` samples (smoother than linear at the ends)."""
     if n <= 0:
@@ -55,4 +74,4 @@ def split_tail(pcm: bytes, ms: float, sample_rate: int) -> tuple[bytes, bytes]:
     return pcm[:cut], pcm[cut:]
 
 
-__all__ = ["silence", "fade_in", "fade_out", "split_tail"]
+__all__ = ["silence", "room_tone", "fade_in", "fade_out", "split_tail"]

@@ -67,10 +67,11 @@
     registerProcessor("cap", Cap);`;
   const playWorklet = `
     class Play extends AudioWorkletProcessor {
-      constructor() { super(); this.q = []; this.off = 0; this.played = 0; this.gen = 0;
+      constructor() { super(); this.q = []; this.off = 0; this.played = 0; this.gen = 0; this.tone = 0; this.lp = 0;
         this.port.onmessage = (e) => { const m = e.data;
           if (m.flush) { this.q = []; this.off = 0; this.port.postMessage({ stopped: true, played: this.played }); this.played = 0; this.gen++; }
           else if (m.mark) { this.played = 0; }
+          else if (m.roomTone !== undefined) { this.tone = m.roomTone === null ? 0 : Math.pow(10, m.roomTone / 20) * 3.8; /* uniform noise through the 0.35 one-pole has rms 0.266 */ }
           else if (m.pcm) { this.q.push(new Float32Array(m.pcm)); } };
       }
       process(inputs, outputs) {
@@ -80,7 +81,8 @@
           out.set(head.subarray(this.off, this.off + take), i); i += take; this.off += take; this.played += take;
           if (this.off >= head.length) { this.q.shift(); this.off = 0; }
         }
-        for (; i < out.length; i++) out[i] = 0;
+        // idle: faint low-passed room tone (same level the server uses in the gaps), not digital zero
+        for (; i < out.length; i++) { this.lp += 0.35 * ((Math.random() * 2 - 1) - this.lp); out[i] = this.lp * this.tone; }
         return true;
       }
     }
@@ -133,7 +135,7 @@
   }
 
   function onEvent(m) {
-    if (m.type === "config") { outRate = m.sampleRate; return; }
+    if (m.type === "config") { outRate = m.sampleRate; if (playNode) playNode.port.postMessage({ roomTone: m.roomToneDbfs === undefined ? null : m.roomToneDbfs }); return; }
     if (m.type === "stop") { playNode.port.postMessage({ flush: true }); return; }
     if (m.type === "busy") { line("warn", "another client is connected; try again in a moment"); return; }
     if (m.type !== "event") return;

@@ -77,6 +77,23 @@ same three sources measured -19.7 / -20.5 / -18.6 dBFS. Eva's own output stream 
 underruns on an 11 s, four-chunk reply: none, so the remaining "ramp" on speakers, if any, is the
 device (Windows loudness equalization / the laptop amp waking after quiet stretches).
 
+## Clip edges and floors (2026-09-20)
+
+One sentence rendered by each model (10 ms hops):
+
+| | first 10 ms | last 10 ms | quietest hop | in-speech pauses p50 | voiced |
+|---|---|---|---|---|---|
+| v3, `eva_en` | -38.7 dBFS | **-31.3 dBFS** | -93.7 | -64.8 | -17.3 |
+| Flash v2.5, `eva_en` | -80.7 | -210 (digital zero) | -210 | -51.7 | -17.1 |
+
+v3 clips are trimmed hot at both ends: with a 50 / 100 ms envelope the reply started audibly and
+stopped dead ("shuts off abruptly"); Flash ends clean but its in-speech floor is 13 dB noisier,
+so a Flash first chunk under v3 also switched backgrounds a sentence in. Since this measurement:
+v3 for every chunk, 120 / 280 ms reply fades, 40 ms edge fades at chunk boundaries, and room
+tone at -62 dBFS in the lead-in, the tail and idle time. Cost: first audio 0.5-0.7 s instead of
+0.2 (`--once` after the change: TTFA 0.67 s, 1.38 s to first audio in text mode). A reply
+measured after the change: lead-in at -62 dBFS, quietest 10 % of hops at -64, tail at -62.
+
 ## The `maya` stack after the 2026-09-19 fixes
 
 Two-utterance simulator run (`samples/user_hello.wav`, `samples/user_ru_rough_day.wav`,

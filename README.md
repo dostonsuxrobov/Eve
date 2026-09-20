@@ -34,7 +34,7 @@ are when the mic's echo canceller is still converging. `--no-greeting`, `--mute-
 
 | preset | STT | brain | TTS |
 |---|---|---|---|
-| `maya` (default) | ElevenLabs Scribe v2 realtime (streams while you talk) | Cerebras `qwen-3.8-27b`, reasoning low | ElevenLabs v3 with delivery cues, Flash for the first chunk; `eva_en` / `eva_ru` voices |
+| `maya` (default) | ElevenLabs Scribe v2 realtime (streams while you talk) | Cerebras `qwen-3.8-27b`, reasoning low | ElevenLabs v3 for every sentence, one delivery cue per reply; `eva_en` / `eva_ru` voices |
 | `local` | Parakeet TDT 0.6B int8 (sherpa-onnx) | Ollama `qwen3:8b`, thinking off | Kokoro (ONNX, CPU) |
 
 The brain is qwen-3.8-27b on Cerebras: 6.2/10 in the eval, 6/6 on tool calls, 0.30 s to the
@@ -61,7 +61,9 @@ prints `open on your phone: https://192.168.0.154:8443` (your laptop's Wi-Fi add
 WebSocket, and plays her voice back; the brain, Scribe and ElevenLabs all still run on the
 laptop, so it is the same Eva. Tap **Start** (the browser asks for the mic), talk; **Stop her**
 interrupts by touch, **End** hangs up; she also hangs up when you say goodbye. The phone's own
-echo canceller keeps her voice out of the mic, and the same words-not-echo barge-in rule applies.
+echo canceller keeps her voice out of the mic (measured on an iPhone: none reached the STT), so
+the laptop's echo defences are off for the web client: barge-in is the plain 300 ms VAD rule
+and nothing you say is second-guessed as her echo (`--echo-gates on` forces them back).
 
 Browsers allow the microphone only on `https://`, so `--tls` makes a self-signed certificate
 for your laptop's address (once, with the openssl that ships with Git for Windows, under
@@ -116,11 +118,18 @@ bench/scenarios.json                    eval scenarios, "lang": "en" | "ru"
   ask for headphones and demand a full transcript before any interruption for thirty seconds.
 * **Fillers and backchannels**: "mm, hang on" if nothing is audible 800 ms after you stop;
   "mm-hm" at a breath inside a long story (headphones).
-* **Delivery**: the brain starts about every other sentence with a cue (`[warm] [soft] [teasing]`
-  ...); v3 renders it, Flash maps it to voice settings; consecutive sentences keep one prosodic
-  line; every reply has a lead-in, fades and a tail (`eva/audio/envelope.py`); and every clip is
-  loudness-leveled per model x voice (`eva/audio/leveler.py`), because Flash, v3 and the Russian
-  voice differ by up to 9 dB otherwise.
+* **One voice per reply**: the brain opens a reply with one cue (`[warm]`, `[teasing]`...) that
+  sets the mood of the whole reply and keeps it across replies unless the mood shifts; every
+  chunk inherits it (a chunk without a cue used to fall back to the default style mid-reply).
+  All sentences go through v3: the Flash first chunk was 0.4 s faster to start but put a
+  different timbre, pace and noise floor on the first sentence of every reply ("rushed start,
+  then it settles"). Loudness is leveled per model x voice (`eva/audio/leveler.py`).
+* **Edges and background**: v3 clips are trimmed hot (first 10 ms at -39 dBFS, last 10 ms at
+  -31), so every reply gets a 120 ms fade in and a 280 ms fade out, every chunk boundary short
+  edge fades, and the lead-in, the tail and idle time carry a faint room tone at v3's own
+  in-speech floor (-62 dBFS, `PipelineSettings.room_tone_dbfs`) instead of digital silence, so
+  the background never switches on with her first word and off after her last
+  (`eva/audio/envelope.py`).
 * **Endings**: say you have to go and she says goodbye and calls `end_conversation` in the same
   reply (a final tool: no second goodbye).
 * **Memory**: durable facts about you are extracted at the end of each session into

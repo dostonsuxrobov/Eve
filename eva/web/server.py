@@ -164,6 +164,7 @@ class WebServer:
         s = self.session
         mic = WebMic()
         player = WebPlayer(ws.send, s.tts.sample_rate)
+        player.room_tone_dbfs = self.settings.room_tone_dbfs
         player.start()
         segmenter = UtteranceSegmenter(self.settings)
 
@@ -239,10 +240,18 @@ async def serve_web(
     tls: bool = False,
     user_name: str = "",
     greeting: bool = True,
+    echo_gates: bool | None = None,
     printer: Any,
 ) -> None:
-    """Warm the providers, then serve until cancelled (Ctrl-C)."""
+    """Warm the providers, then serve until cancelled (Ctrl-C).
+
+    ``echo_gates``: True keeps the laptop's echo gating on for the phone too; None / False turns it off.
+    """
     settings = dataclasses.replace(settings)
+    if echo_gates is not True:
+        # The phone's browser cancels its own echo (measured on an iPhone: none reached the STT),
+        # and the laptop-mic gates only produced false positives there.
+        settings = dataclasses.replace(settings, barge_in_confirm="vad", echo_detector=False, self_echo_gate=False)
     server = WebServer(session, settings, user_name=user_name, greeting=greeting, printer=printer)
     ip = lan_ip()
     ssl_ctx: ssl.SSLContext | None = None
@@ -253,7 +262,8 @@ async def serve_web(
         ssl_ctx.load_cert_chain(str(cert), str(key))
     await asyncio.gather(session.stt.warmup(), session.llm.warmup(), session.tts.warmup())
     scheme = "https" if tls else "http"
-    printer("web_ready", {"url": f"{scheme}://{ip}:{port}", "local": f"{scheme}://localhost:{port}", "tls": tls})
+    printer("web_ready", {"url": f"{scheme}://{ip}:{port}", "local": f"{scheme}://localhost:{port}", "tls": tls,
+                          "echo_gates": settings.barge_in_confirm == "words"})
     async with serve(server.handle, host, port, ssl=ssl_ctx, process_request=server.process_request, max_size=2**20, ping_interval=20, ping_timeout=20):
         await asyncio.Future()  # until cancelled
 

@@ -87,14 +87,26 @@ class PipelineSettings:
     filler_after_ms: int = 900  # play a filler if no agent audio by then (0 = off)
     first_chunk_min_chars: int = 14  # send first TTS chunk early (after a comma) for low TTFA
     min_chunk_chars: int = 6  # sentences shorter than this are merged into the next chunk
+    # Self-echo gate on transcripts: drop an utterance that began while she was audible and
+    # reads like a garbled copy of what she was saying (the laptop's mic leaks the speakers).
+    # Off for the phone client: the browser's echo canceller does the job and the gate only
+    # produced false positives (people repeat the other person's words).
+    self_echo_gate: bool = True
     # Envelope of a spoken turn (eva.audio.envelope): TTS clips are trimmed hard at both
     # ends, so without this a reply starts at full volume the instant the endpoint fires
     # and stops dead on the last sample. Milliseconds; 0 disables a stage.
-    lead_in_ms: int = 80  # silence before the first audio of a reply (skipped after a filler)
-    fade_in_ms: int = 50
-    fade_out_ms: int = 100
-    tail_ms: int = 350  # silence after the last word before she is "listening" again
-    sentence_gap_ms: int = 0  # extra silence between sentence chunks (pace is tuned; leave 0)
+    # Measured on v3 clips (2026-09-20): they are trimmed hot, the first 10 ms at -39 dBFS and
+    # the last 10 ms at -31 dBFS, so short fades left an audible start and an abrupt stop.
+    lead_in_ms: int = 100  # room tone before the first audio of a reply (skipped after a filler)
+    fade_in_ms: int = 120
+    fade_out_ms: int = 280
+    tail_ms: int = 450  # room tone after the last word before she is "listening" again
+    sentence_gap_ms: int = 0  # extra room tone between sentence chunks (pace is tuned; leave 0)
+    chunk_edge_ms: int = 40  # short fades at every chunk boundary: each v3 clip has hot edges
+    # A faint constant noise bed at v3's own in-speech floor (median -65 dBFS measured), played
+    # in every gap and while idle, so the background never switches on with her first word and
+    # off after her last. None = digital silence.
+    room_tone_dbfs: float | None = -62.0
     tts_parallelism: int = 2  # sentences synthesized ahead of playback
     input_device: int | None = None
     output_device: int | None = None
@@ -153,15 +165,20 @@ _MAYA_TTS: dict[str, Any] = {
     "kind": "elevenlabs",
     "voice": "eva_en",  # per-language voices come from eva/assets/lang/*.toml
     "model_id": "eleven_v3",
-    "first_chunk_model": "eleven_flash_v2_5",
+    # v3 for every chunk. The Flash first chunk (0.2 s to first audio against v3's 0.5-0.9) put
+    # a different timbre, pace and noise floor on the first sentence of every reply: "rushed
+    # start, then it settles". Set "first_chunk_model": "eleven_flash_v2_5" to trade back.
+    "first_chunk_model": None,
 }
 _MAYA_SETTINGS = PipelineSettings(
-    endpoint_silence_ms=500, filler_after_ms=800, backchannels=True, first_chunk_min_chars=18, min_chunk_chars=10,
+    endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
+    # a first chunk that is a whole clause and no tiny clips: short clips sound rushed and clipped
+    first_chunk_min_chars=40, min_chunk_chars=20,
 )
 _MAYA_EARS_AND_VOICE = (
-    "Scribe realtime STT, ElevenLabs v3 with delivery tags on the eva_en / eva_ru voices, Flash for "
-    "the first chunk so the reply starts fast, prosodic continuity between sentences, backchannels "
-    "(headphones). Falls back to Parakeet / Ollama qwen3:8b / Kokoro when a cloud service stops answering."
+    "Scribe realtime STT, ElevenLabs v3 on the eva_en / eva_ru voices with one delivery cue per reply, "
+    "backchannels (headphones). Falls back to Parakeet / Ollama qwen3:8b / Kokoro when a cloud service "
+    "stops answering."
 )
 
 
