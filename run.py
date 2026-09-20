@@ -109,6 +109,8 @@ class StatusPrinter:
             console.print("[dim]Ctrl-C stops the server[/]")
         elif name == "web_client":
             console.print(f"[dim]phone {data['state']}: {escape(str(data['peer']))}[/]")
+        elif name == "web_hello":
+            console.print(f"[dim]phone: echo cancel {'on' if data['aec'] else 'off'}, buffer {data['prebuffer_s'] * 1000:.0f} ms, echo gates {'on' if data['gates'] else 'off'}[/]")
         elif name == "memory_saved":
             console.print(f"[dim]memory saved ({data['facts']} facts)[/]")
         elif name == "stt_incomplete":

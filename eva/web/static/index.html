@@ -21,6 +21,8 @@
   button { flex:1; font-size:17px; padding:14px 10px; border:0; border-radius:12px; background:#2b2f3a; color:var(--fg); }
   button.primary { background:#3b82f6; } button:disabled { opacity:.45; }
   #speaking { display:none; }
+  #bar { display:flex; gap:14px; padding:0 16px 6px; font-size:12px; color:var(--dim); flex-wrap:wrap; }
+  #bar a { color:var(--dim); text-decoration:underline dotted; }
 </style>
 </head>
 <body>
@@ -29,6 +31,11 @@
   <div id="status">tap Start</div>
   <div id="meter"><i id="meterbar"></i></div>
 </header>
+<div id="bar">
+  <span id="stats">-</span>
+  <a id="aec" href="#">echo cancel: on</a>
+  <a id="buf" href="#">buffer: 350 ms</a>
+</div>
 <div id="log"></div>
 <footer>
   <button id="start" class="primary">Start</button>
@@ -41,6 +48,20 @@
   const log = $("log"), status = $("status"), meterbar = $("meterbar");
   const startBtn = $("start"), stopBtn = $("stop"), endBtn = $("end");
   let ws, ctx, micNode, playNode, stream, outRate = 24000, running = false, evaLine = null;
+  // switches live in the URL so a reload keeps them: ?aec=0 (no browser echo cancelling: the
+  // laptop's echo defences are used instead), ?buf=0.5 (seconds held before a reply starts)
+  const params = new URLSearchParams(location.search);
+  const AEC = params.get("aec") !== "0";
+  const BUF = Math.min(1.5, Math.max(0.1, parseFloat(params.get("buf") || "0.35")));
+  $("aec").textContent = "echo cancel: " + (AEC ? "on" : "off");
+  $("buf").textContent = "buffer: " + Math.round(BUF * 1000) + " ms";
+  $("aec").onclick = (e) => { e.preventDefault(); params.set("aec", AEC ? "0" : "1"); location.search = params.toString(); };
+  $("buf").onclick = (e) => { e.preventDefault(); const next = BUF < 0.3 ? 0.35 : BUF < 0.5 ? 0.6 : BUF < 0.9 ? 1.0 : 0.2; params.set("buf", String(next)); location.search = params.toString(); };
+  let rtt = null, lastStats = { queued: 0, underruns: 0, pre: 0 };
+  function showStats() {
+    $("stats").textContent = "buffer " + Math.round(lastStats.queued * 1000) + " ms" + (lastStats.pre ? " (hold " + Math.round(lastStats.pre * 1000) + ")" : "")
+      + " · drops " + lastStats.underruns + (rtt !== null ? " · rtt " + Math.round(rtt) + " ms" : "");
+  }
 
   function line(cls, text) {
     const el = document.createElement("div"); el.className = "line " + cls; el.textContent = text;
@@ -71,13 +92,13 @@
       // mid-reply hold "re" seconds before resuming, so a Wi-Fi hiccup is one short pause instead
       // of a stutter. "eot" (end of the reply) or 400 ms without new data drains whatever is held.
       constructor() { super(); this.q = []; this.off = 0; this.queued = 0; this.played = 0; this.tone = 0; this.lp = 0;
-        this.pre = 0.25 * sampleRate; this.re = 0.15 * sampleRate; this.need = this.pre; this.playing = false;
-        this.drain = false; this.lastData = 0; this.underruns = 0;
+        this.pre = 0.35 * sampleRate; this.re = 0.2 * sampleRate; this.need = this.pre; this.playing = false;
+        this.drain = false; this.lastData = 0; this.underruns = 0; this.lastStat = 0;
         this.port.onmessage = (e) => { const m = e.data;
           if (m.flush) { this.q = []; this.off = 0; this.queued = 0; this.playing = false; this.need = this.pre; this.drain = false;
                          this.port.postMessage({ stopped: true, played: this.played }); this.played = 0; }
           else if (m.eot) { this.drain = true; }
-          else if (m.prebuffer !== undefined) { this.pre = m.prebuffer * sampleRate; this.need = this.pre; }
+          else if (m.prebuffer !== undefined) { this.pre = m.prebuffer * sampleRate; this.re = Math.min(this.pre, 0.6 * m.prebuffer * sampleRate); this.need = this.pre; }
           else if (m.roomTone !== undefined) { this.tone = m.roomTone === null ? 0 : Math.pow(10, m.roomTone / 20) * 3.8; /* uniform noise through the 0.35 one-pole has rms 0.266 */ }
           else if (m.pcm) { const a = new Float32Array(m.pcm); this.q.push(a); this.queued += a.length; this.lastData = currentTime; this.drain = false; } };
       }
@@ -101,6 +122,7 @@
           }
         }
         for (; i < out.length; i++) { this.lp += 0.35 * ((Math.random() * 2 - 1) - this.lp); out[i] = this.lp * this.tone; }
+        if (currentTime - this.lastStat > 0.5) { this.lastStat = currentTime; this.port.postMessage({ stats: { queued: this.queued / sampleRate, underruns: this.underruns, pre: this.pre / sampleRate } }); }
         return true;
       }
     }
@@ -122,7 +144,7 @@
   async function start() {
     startBtn.disabled = true; setStatus("asking for the mic...");
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }, video: false });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: AEC, noiseSuppression: AEC, autoGainControl: AEC, channelCount: 1 }, video: false });
     } catch (e) { setStatus("mic blocked: " + e.message + (location.protocol === "http:" ? " (needs https)" : "")); startBtn.disabled = false; return; }
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     await ctx.resume();
@@ -133,6 +155,7 @@
     playNode.port.onmessage = (e) => {
       if (e.data.stopped && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "stopped", played: e.data.played }));
       if (e.data.underrun) setStatus("network hiccup (" + e.data.underrun + ")");
+      if (e.data.stats) { lastStats = e.data.stats; showStats(); }
     };
     const src = ctx.createMediaStreamSource(stream);
     micNode = new AudioWorkletNode(ctx, "cap", { numberOfInputs: 1, numberOfOutputs: 0 });
@@ -141,8 +164,10 @@
     setStatus("connecting to " + location.host + "...");
     ws = new WebSocket(url); ws.binaryType = "arraybuffer";
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "hello", sampleRate: ctx.sampleRate, ua: navigator.userAgent }));
+      ws.send(JSON.stringify({ type: "hello", sampleRate: ctx.sampleRate, ua: navigator.userAgent, aec: AEC, prebufferS: BUF }));
       running = true; stopBtn.disabled = false; endBtn.disabled = false; setStatus("listening (mic " + ctx.sampleRate + " Hz)");
+      playNode.port.postMessage({ prebuffer: BUF });
+      setInterval(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ping", t: performance.now() })); }, 2000);
       micNode.port.onmessage = (e) => { if (ws.readyState === 1) ws.send(e.data.pcm); meterbar.style.width = Math.min(100, e.data.peak * 300) + "%"; };
     };
     ws.onmessage = (e) => {
@@ -158,6 +183,7 @@
   function onEvent(m) {
     if (m.type === "config") { outRate = m.sampleRate; if (playNode) { playNode.port.postMessage({ roomTone: m.roomToneDbfs === undefined ? null : m.roomToneDbfs }); if (m.prebufferS) playNode.port.postMessage({ prebuffer: m.prebufferS }); } return; }
     if (m.type === "eot") { if (playNode) playNode.port.postMessage({ eot: true }); return; }
+    if (m.type === "pong") { rtt = performance.now() - m.t; showStats(); return; }
     if (m.type === "stop") { playNode.port.postMessage({ flush: true }); return; }
     if (m.type === "busy") { line("warn", "another client is connected; try again in a moment"); return; }
     if (m.type !== "event") return;

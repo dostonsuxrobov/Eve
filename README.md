@@ -82,6 +82,13 @@ for your laptop's address (once, with the openssl that ships with Git for Window
 Both phone and laptop must be on the same Wi-Fi for the direct URL; Windows may ask once to
 allow Python through the firewall on a private network. One phone at a time.
 
+If her voice sounds like a bad phone line, the small line under the header tells you which of
+two things it is: `buffer ... · drops N · rtt ... ms`. Rising **drops** means Wi-Fi jitter: tap
+`buffer: 350 ms` to hold more before each reply (0.2 / 0.35 / 0.6 / 1.0 s; ~the same delay
+added to her first word). **Zero drops** and still choppy means the phone's own voice
+processing: tap `echo cancel: on` to turn the browser's echo canceller off (`?aec=0`); the
+laptop's echo defences come back on for that connection so she does not answer herself.
+
 ## Languages
 
 `--lang auto` (default) follows you: Scribe auto-detects, the voice switches per sentence by

@@ -109,9 +109,13 @@ def ensure_certificate(ip: str) -> tuple[Path, Path]:
 
 # ------------------------------------------------------------------------- the server
 class WebServer:
-    def __init__(self, session: Session, settings: PipelineSettings, *, user_name: str, greeting: bool, printer: Any) -> None:
+    def __init__(
+        self, session: Session, settings: PipelineSettings, *, user_name: str, greeting: bool, printer: Any,
+        gated_settings: PipelineSettings | None = None,
+    ) -> None:
         self.session = session
-        self.settings = settings
+        self.settings = settings  # for a phone that cancels its own echo (the default)
+        self.gated_settings = gated_settings or settings  # for a phone with ?aec=0: the laptop's echo defences
         self.user_name = user_name
         self.greeting = greeting
         self.printer = printer
@@ -162,11 +166,29 @@ class WebServer:
 
     async def _conversation(self, ws: ServerConnection) -> None:
         s = self.session
-        mic = WebMic()
+        # the client's hello decides the settings: without browser echo cancelling the
+        # laptop's echo defences come back on
+        hello: dict[str, Any] = {}
+        async for first in ws:
+            if isinstance(first, bytes):
+                continue
+            try:
+                hello = json.loads(first)
+            except ValueError:
+                continue
+            if hello.get("type") == "hello":
+                break
+        settings = self.settings if hello.get("aec", True) else self.gated_settings
+        mic = WebMic(int(hello.get("sampleRate") or 48000))
         player = WebPlayer(ws.send, s.tts.sample_rate)
-        player.room_tone_dbfs = self.settings.room_tone_dbfs
+        player.room_tone_dbfs = settings.room_tone_dbfs
+        if hello.get("prebufferS"):
+            player.prebuffer_s = float(hello["prebufferS"])
+            player.latency_s = 0.2 + player.prebuffer_s
         player.start()
-        segmenter = UtteranceSegmenter(self.settings)
+        segmenter = UtteranceSegmenter(settings)
+        log.info("hello: mic %s Hz, aec=%s, prebuffer %.2f s, %s", mic.sample_rate, hello.get("aec", True), player.prebuffer_s, str(hello.get("ua", ""))[:80])
+        self.printer("web_hello", {"aec": hello.get("aec", True), "prebuffer_s": player.prebuffer_s, "gates": settings.barge_in_confirm == "words"})
 
         def on_event(name: str, data: dict[str, Any]) -> None:
             self.printer(name, data)
@@ -174,13 +196,17 @@ class WebServer:
                 player.send_event(name, data)
 
         agent = VoiceAgent(
-            s.stt, s.llm, s.tts, s.system_prompt, s.tools, self.settings,
+            s.stt, s.llm, s.tts, s.system_prompt, s.tools, settings,
             frames=mic.frames(), segmenter=segmenter, player=player,
             fillers=s.fillers, tool_hints=s.tool_hints, backchannels=s.backchannels, on_event=on_event,
         )
         await agent.prepare()
         agent._select_lang(s.plan.primary.code)
-        run_task: asyncio.Task[Any] | None = None
+        if self.greeting:
+            # launch it now: run() only polls its event queue between mic frames
+            agent.pending_events.put_nowait(s.greeting_event(self.user_name))
+            await agent.poll_pending_events()
+        run_task: asyncio.Task[Any] | None = asyncio.create_task(agent.run(), name="eva-web-run")
         try:
             async for msg in ws:
                 if isinstance(msg, bytes):
@@ -191,15 +217,8 @@ class WebServer:
                 except ValueError:
                     continue
                 kind = m.get("type")
-                if kind == "hello":
-                    mic.set_rate(int(m.get("sampleRate") or 48000))
-                    log.info("hello: mic %s Hz, %s", mic.sample_rate, str(m.get("ua", ""))[:80])
-                    if run_task is None:
-                        if self.greeting:
-                            # launch it now: run() only polls its event queue between mic frames
-                            agent.pending_events.put_nowait(s.greeting_event(self.user_name))
-                            await agent.poll_pending_events()
-                        run_task = asyncio.create_task(agent.run(), name="eva-web-run")
+                if kind == "ping":
+                    await ws.send(json.dumps({"type": "pong", "t": m.get("t")}))
                 elif kind == "stopped":
                     player.note_stopped(int(m.get("played") or 0))
                 elif kind == "interrupt":
@@ -247,12 +266,15 @@ async def serve_web(
 
     ``echo_gates``: True keeps the laptop's echo gating on for the phone too; None / False turns it off.
     """
+    gated = dataclasses.replace(settings)  # the laptop's echo defences, for a phone with ?aec=0
     settings = dataclasses.replace(settings)
     if echo_gates is not True:
         # The phone's browser cancels its own echo (measured on an iPhone: none reached the STT),
         # and the laptop-mic gates only produced false positives there.
         settings = dataclasses.replace(settings, barge_in_confirm="vad", echo_detector=False, self_echo_gate=False)
-    server = WebServer(session, settings, user_name=user_name, greeting=greeting, printer=printer)
+    if echo_gates is False:
+        gated = settings
+    server = WebServer(session, settings, user_name=user_name, greeting=greeting, printer=printer, gated_settings=gated)
     ip = lan_ip()
     ssl_ctx: ssl.SSLContext | None = None
     if tls:
