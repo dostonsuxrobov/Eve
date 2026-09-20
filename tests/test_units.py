@@ -11,7 +11,8 @@ import numpy as np
 
 from eva import lang
 from eva.audio.leveler import ClipLeveler, Leveler, voiced_rms_dbfs
-from eva.delivery import is_hesitation, looks_hallucinated, looks_incomplete, looks_like_echo
+from eva.audio.echo import EchoDetector
+from eva.delivery import echo_similarity, is_hesitation, looks_hallucinated, looks_incomplete, looks_like_echo
 from eva.interfaces import Tool
 from eva.llm.chunker import SentenceChunker
 from eva.memory import Memory
@@ -151,3 +152,68 @@ def test_leveler_equalises_sources_without_pumping() -> None:
     hot = ClipLeveler(lev, "k", 8.0)  # x8 on a -13 dBFS sine would peak at 2.5 FS without the knee
     a = np.frombuffer(hot.process(_tone(-13.0)), dtype=np.int16)
     assert 0.9 * 32767 < np.abs(a).max() < 32767
+
+
+def test_fuzzy_echo_on_the_garbled_lines_from_the_live_log() -> None:
+    # her sentence -> what Scribe made of it coming back through the speakers (2026-09-19 session)
+    assert echo_similarity("А когда придёшь к ней, шей.", "Ладно, когда придёшь к решению") >= 0.6
+    assert echo_similarity("Сделай агенту.", "К ней? К Евой-агенту?") >= 0.6
+    assert echo_similarity("И это уже лучше, чем...", "у неё есть конкретная задача, и это уже лучше,") >= 0.6
+    assert looks_like_echo("Вижу, у тебя", "А я с ней вижу. Вижу, у тебя", min_words=2, fuzzy=0.6)
+    # a person talking over her
+    assert echo_similarity("wait, stop, I have a question", "Yeah, those days happen. The ones where even making tea feels like a project.") < 0.6
+    assert echo_similarity("what about your day", "Yeah, those days happen. The ones where even making tea feels like a project.") < 0.6
+
+
+class _FakePlayer:
+    sample_rate = 24000
+
+    def __init__(self) -> None:
+        self.hist: list[tuple[float, bytes]] = []
+
+    def played_since(self, t: float) -> list[tuple[float, bytes]]:
+        return [h for h in self.hist if h[0] >= t]
+
+
+def _speechlike(n: int, sr: int, rng: np.random.Generator) -> np.ndarray:
+    x = np.convolve(rng.standard_normal(n), np.ones(8) / 8, mode="same")
+    env = 0.5 + 0.5 * np.sin(2 * np.pi * 4 * np.arange(n) / sr) ** 2
+    return (x * env / np.abs(x * env).max() * 0.5).astype(np.float32)
+
+
+def _echo_scores(echo_gain: float, user_gain: float, lag_ms: int = 120) -> tuple[float, float, float]:
+    """(median score, median lag ms, fraction flagged) over 1.5 s of mic audio."""
+    rng = np.random.default_rng(7)
+    sr_out, sr_mic = 24000, 16000
+    player = _FakePlayer()
+    det = EchoDetector(player, sr_mic)
+    played = _speechlike(sr_out * 2, sr_out, rng)
+    t0 = 1000.0
+    block = sr_out // 50
+    for i in range(0, played.size, block):
+        player.hist.append((t0 + i / sr_out, (played[i : i + block] * 32767).astype(np.int16).tobytes()))
+    played16 = np.interp(np.linspace(0, played.size - 1, played.size * 2 // 3), np.arange(played.size), played)
+    lag = int(sr_mic * lag_ms / 1000)
+    echo = np.convolve(np.concatenate([np.zeros(lag), played16])[: played16.size], np.ones(5) / 5, mode="same") * echo_gain
+    mic = echo + _speechlike(played16.size, sr_mic, rng) * user_gain + rng.standard_normal(played16.size) * 0.02
+    frame = sr_mic // 50
+    res = []
+    for i in range(0, mic.size - frame, frame):
+        det.push_mic(mic[i : i + frame])
+        if i > sr_mic // 2 and (i // frame) % 3 == 0:
+            v = det.check(now=t0 + (i + frame) / sr_mic)
+            res.append((v.score, v.lag_s * 1000, v.is_echo))
+    return float(np.median([r[0] for r in res])), float(np.median([r[1] for r in res])), float(np.mean([r[2] for r in res]))
+
+
+def test_echo_detector_separates_speaker_echo_from_the_user() -> None:
+    score, lag, flagged = _echo_scores(0.1, 0.0)  # AEC residual, -20 dB
+    assert flagged > 0.9 and abs(lag - 120) < 40, (score, lag, flagged)
+    score, lag, flagged = _echo_scores(0.1, 0.0, lag_ms=300)
+    assert flagged > 0.9 and abs(lag - 300) < 40, (score, lag, flagged)
+    score, _, flagged = _echo_scores(0.0, 0.3)  # the user alone
+    assert flagged < 0.1 and score < 0.25
+    score, _, flagged = _echo_scores(0.1, 0.3)  # the user talking over the echo: counts as the user
+    assert flagged < 0.15 and score < 0.3
+    score, _, flagged = _echo_scores(0.0, 0.0)  # silence
+    assert flagged == 0.0

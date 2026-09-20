@@ -22,6 +22,7 @@ eva/
   audio/player.py    sounddevice output with instant stop() and played-sample accounting
   audio/envelope.py  lead-in / fade-in / fade-out / tail shaping of every spoken turn
   audio/leveler.py   loudness leveling per TTS source (model x voice)
+  audio/echo.py      is the mic hearing the speakers? (cross-correlation with what the player played)
   stt/               elevenlabs_realtime.py (+ elevenlabs_scribe.py batch), sherpa_parakeet.py
   llm/openai_compat.py  streaming chat-completions client (Cerebras, Ollama, anything)
   llm/chunker.py     stream text -> TTS-sized sentence chunks (early first chunk, JSON kept whole)
@@ -91,7 +92,13 @@ script-agnostic; everything that differs is data under `eva/assets/`.
   proportionally, appending " [interrupted]" so the LLM knows what the user heard.
   The confirmation counts speech-positive VAD windows (`segmenter.speaking_ms` /
   `SpeechEnd.speech_ms`), never the utterance length (which includes the 300 ms pre-speech
-  ring and a 150 ms tail). The pipeline sets `turn.cancelled` before `stop()`, cancels and
+  ring and a 150 ms tail). While she is audible that is not enough (speaker echo passes the
+  VAD): `PipelineSettings.barge_in_confirm = "words"` also needs the streaming STT's partial
+  transcript to carry real words that are not a fuzzy match of her current reply
+  (`delivery.echo_similarity` >= 0.6 is echo) and the echo detector to say the mic is not
+  hearing the speakers; an onset that ends unproven is decided on its final transcript
+  (`_late_check`). Three echo classifications in 20 s open a 30 s "storm" in which only the
+  final transcript can interrupt. The pipeline sets `turn.cancelled` before `stop()`, cancels and
   awaits the response task, then calls `stop()` again: a writer/filler wake-up that was
   already scheduled in the same loop iteration cannot leave audio behind.
 

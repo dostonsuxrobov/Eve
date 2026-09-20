@@ -249,6 +249,15 @@ class FailoverSTT:
         await self.primary.warmup()
         self._warm_task = _warm_in_background(self.backup, "stt")
 
+    @property
+    def on_partial(self) -> Any:
+        return getattr(self.primary, "on_partial", None)
+
+    @on_partial.setter
+    def on_partial(self, cb: Any) -> None:
+        if hasattr(self.primary, "on_partial"):
+            self.primary.on_partial = cb
+
     # streaming path: primary only
     async def feed(self, pcm: np.ndarray) -> None:
         if self.health.down_since is not None:

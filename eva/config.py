@@ -73,6 +73,17 @@ class PipelineSettings:
     max_utterance_s: float = 30.0
     barge_in: bool = True
     barge_in_min_speech_ms: int = 300  # how long the user must talk to interrupt
+    # While she is audible, a VAD onset alone must not interrupt her: through speakers her
+    # own voice reaches the mic, and a session on 2026-09-19 looped twelve turns on that
+    # (she cut herself off, transcribed her own garbled echo, answered it). "words": the
+    # streaming STT's partial transcript must carry real words that are not a fuzzy match
+    # of what she is saying, and the echo detector must not hear the speakers; with no
+    # partial at all after barge_in_words_wait_ms of speech the onset counts anyway (the
+    # STT is lagging). "vad": the old 300 ms-of-speech rule. While she is silent (thinking)
+    # the VAD rule applies in both modes: there is nothing to echo.
+    barge_in_confirm: str = "words"
+    barge_in_words_wait_ms: int = 1500
+    echo_detector: bool = True  # eva.audio.echo: correlate the mic with what the player just played
     filler_after_ms: int = 900  # play a filler if no agent audio by then (0 = off)
     first_chunk_min_chars: int = 14  # send first TTS chunk early (after a comma) for low TTFA
     min_chunk_chars: int = 6  # sentences shorter than this are merged into the next chunk

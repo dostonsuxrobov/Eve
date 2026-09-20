@@ -826,6 +826,88 @@ async def scenario_final_tool_goodbye(verbose: bool) -> tuple[Check, dict[str, A
     return c, {"turns": _turn_rows(turns) + _turn_rows(turns2), "llm_calls": [len(llm.calls), len(llm2.calls)]}
 
 
+REPLY = "So here's the thing about long days, they don't really end, they just sort of fade out until you notice you're on the couch."
+
+
+async def _speaking_barge_in(verbose: bool, partial: str | None, late_text: str, *, storm: bool = False) -> tuple[Check, Any, Any, Any]:
+    """Eva says REPLY; 0.3 s into it a 1.0 s VAD onset happens. ``partial`` is what the streaming STT
+    reports 0.15 s after the onset (None = no partial at all); ``late_text`` is the final transcript."""
+    c = Check()
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    stt = MockStreamingSTT(["How was your day?", late_text], delay_s=0.2, commit_delay_s=0.1)
+    llm = MockLLM([REPLY, "Sure, what's up?"], ttft_s=0.2)
+    tts = MockTTS(ttfa_s=0.1, realtime_factor=0.3)
+    seg = ScriptedSegmenter(script=[(0.3, 1.0)])
+    settings = _settings(filler_after_ms=0, barge_in_min_speech_ms=300)
+
+    def hook(name: str, data: dict[str, Any]) -> None:
+        if name == "audio_start" and len(log.all("audio_start")) == 1:
+            seg.schedule(time.perf_counter() + 0.3, 1.0)
+        if name == "barge_in_candidate" and partial is not None:
+            asyncio.get_running_loop().call_later(0.15, stt.emit_partial, partial)
+
+    log.hooks.append(hook)
+    agent = _mock_agent(
+        stt=stt, llm=llm, tts=tts, player=player, segmenter=seg, frames=silent_frames(9), settings=settings,
+        log=log, max_turns=2,
+    )
+    if storm:
+        agent._storm_until = time.perf_counter() + 30
+    c.ok(agent.stt_streaming, "streaming STT not detected")
+    turns = await asyncio.wait_for(agent.run(), timeout=25)
+    return c, log, turns, agent
+
+
+async def scenario_echo_partial_does_not_interrupt(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(u) while she is audible, a VAD onset whose partial transcript is a fuzzy copy of what she is
+    saying (her own voice through the speakers) must not cut her off, and is never answered."""
+    c, log, turns, agent = await _speaking_barge_in(verbose, "the thing about long days they don't", "the thing about long days")
+    c.ok(len(turns) == 1, f"expected 1 turn, got {len(turns)}")
+    c.ok(bool(turns) and not turns[0].interrupted, "she was interrupted by her own echo")
+    c.ok(bool(turns) and turns[0].assistant_text == REPLY, "reply not spoken in full")
+    ig = log.first("barge_in_ignored")
+    c.ok(ig is not None and ig[1].get("reason") == "echo", f"echo onset not ignored: {ig}")
+    c.ok(len(log.all("stt")) == 1, "the echo was transcribed as a user turn")
+    return c, {"turns": _turn_rows(turns)}
+
+
+async def scenario_real_words_interrupt(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(v) the same onset with real words in the partial interrupts her at once and is answered."""
+    c, log, turns, agent = await _speaking_barge_in(verbose, "wait wait stop that", "Wait, stop, I have a question.")
+    c.ok(len(turns) == 2, f"expected 2 turns, got {len(turns)}")
+    c.ok(bool(turns) and turns[0].interrupted, "she was not interrupted by real words")
+    bi = log.first("barge_in")
+    c.ok(bi is not None and bi[1]["reason"] == "barge-in", f"no immediate barge-in: {bi}")
+    c.ok(len(turns) == 2 and turns[1].user_text == "Wait, stop, I have a question.", "the interjection was not answered")
+    return c, {"turns": _turn_rows(turns)}
+
+
+async def scenario_late_check_on_final_text(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(w) no partial ever arrives (a short interjection the STT was slow on): the onset ends
+    unconfirmed, the final transcript is fetched, real words interrupt her late and are answered;
+    an echo final transcript is dropped."""
+    c, log, turns, agent = await _speaking_barge_in(verbose, None, "Wait, I have a question.")
+    c.ok(len(turns) == 2, f"expected 2 turns, got {len(turns)}")
+    bi = log.first("barge_in")
+    c.ok(bi is not None and bi[1]["reason"] == "barge-in (late)", f"expected a late barge-in: {bi}")
+    c.ok(len(turns) == 2 and turns[1].user_text == "Wait, I have a question.", "late interjection not answered")
+    c2, log2, turns2, _ = await _speaking_barge_in(verbose, None, "they just sort of fade out")
+    c.ok(len(turns2) == 1 and not turns2[0].interrupted, "an echo final transcript interrupted her")
+    ig = log2.first("barge_in_ignored")
+    c.ok(ig is not None and "echo" in str(ig[1].get("reason")), f"echo final text not ignored: {ig}")
+    return c, {"turns": _turn_rows(turns) + _turn_rows(turns2)}
+
+
+async def scenario_storm_needs_final_text(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(x) in an echo storm a partial with words is not enough: only the final transcript interrupts."""
+    c, log, turns, agent = await _speaking_barge_in(verbose, "wait wait stop that", "Wait, stop, I have a question.", storm=True)
+    bi = log.first("barge_in")
+    c.ok(bi is not None and bi[1]["reason"] == "barge-in (late)", f"storm: expected only the late path, got {bi}")
+    c.ok(len(turns) == 2 and turns[1].user_text == "Wait, stop, I have a question.", "storm: interjection lost")
+    return c, {"turns": _turn_rows(turns)}
+
+
 SCENARIOS = [
     ("a_normal_two_turns", scenario_normal_two_turns),
     ("b_barge_in", scenario_barge_in),
@@ -847,6 +929,10 @@ SCENARIOS = [
     ("r_adaptive_commit_deadline", scenario_adaptive_commit_deadline),
     ("s_llm_keepalive", scenario_llm_keepalive),
     ("t_final_tool_goodbye", scenario_final_tool_goodbye),
+    ("u_echo_partial_does_not_interrupt", scenario_echo_partial_does_not_interrupt),
+    ("v_real_words_interrupt", scenario_real_words_interrupt),
+    ("w_late_check_on_final_text", scenario_late_check_on_final_text),
+    ("x_storm_needs_final_text", scenario_storm_needs_final_text),
 ]
 
 

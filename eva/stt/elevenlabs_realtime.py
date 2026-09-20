@@ -405,7 +405,7 @@ class ElevenLabsRealtimeSTT:
             sample_rate=sample_rate,
             chunk_ms=self.chunk_ms,
             include_timestamps=self.include_timestamps,
-            on_partial=self.on_partial,
+            on_partial=self._forward_partial,  # reads self.on_partial at call time: the pipeline sets it after warmup
             commit_timeout_s=self.commit_timeout_s,
             keepalive_s=self.keepalive_s,
             on_closed=self._session_closed,
@@ -420,6 +420,11 @@ class ElevenLabsRealtimeSTT:
         self.last_connect_s = time.perf_counter() - t0
         log.info("%s session %s open in %.3f s", self.name, session.session_id, self.last_connect_s)
         return session
+
+    def _forward_partial(self, text: str) -> None:
+        cb = self.on_partial
+        if cb is not None:
+            cb(text)
 
     def _session_closed(self, session: RealtimeSession) -> None:
         """The server (or the network) closed a socket we did not close ourselves.

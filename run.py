@@ -83,6 +83,17 @@ class StatusPrinter:
             console.print("[dim]  (just a hesitation, waiting for you)[/]")
         elif name == "stt_echo":
             console.print("[dim]  (that was my own voice through the mic, ignored)[/]")
+        elif name == "barge_in_echo":
+            console.print(f"[dim]  (hearing myself through the speakers, not stopping; echo {data.get('echo_ratio')})[/]")
+        elif name == "barge_in_ignored":
+            reason = data.get("reason", "")
+            if reason != "blip":
+                console.print(f"[dim]  (not a real interruption: {escape(str(reason))})[/]")
+        elif name == "echo_storm":
+            console.print(
+                "[yellow]the speakers keep reaching the mic: for the next "
+                f"{data['hold_s']:.0f} s only a full transcript can interrupt me. Headphones, or lower the volume.[/]"
+            )
         elif name == "stt_incomplete":
             console.print(f"[dim]  (sounds unfinished, giving you {data['grace_ms']} ms)[/]")
         elif name == "utterance_carried":
@@ -196,6 +207,11 @@ async def amain(args: argparse.Namespace) -> int:
     if plan.locked and session.persona.lang != plan.mode:
         console.print(f"[dim]no {plan.mode} version of persona {session.persona.name!r}; using the English prompt with a locked-language rule[/]")
     console.print(f"[dim]language: {plan.mode} | persona: {session.persona.name} ({session.persona.lang}) | brain: {llm.name}[/]")
+    if not args.text:
+        console.print(
+            f"[dim]barge-in: {settings.barge_in_confirm} (while I talk, your words must show up in the transcript"
+            f"{' and the echo detector must not hear the speakers' if settings.echo_detector else ''})[/]"
+        )
 
     # Open the audio devices BEFORE any network warmup: a missing/denied microphone
     # should fail fast without spending API calls or leaving warmup tasks dangling.

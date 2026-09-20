@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from collections import deque
 from typing import Any
 
 import numpy as np
@@ -40,6 +41,11 @@ class Player:
         self.callback_errors = 0
         self._stream: Any = None
         self._closed = False
+        # What actually went to the device, with the time it left: (perf_counter, int16 bytes)
+        # per callback block, about the last `played_history_s` seconds. The echo detector
+        # (eva.audio.echo) correlates mic frames against this.
+        self.played_history_s = 2.0
+        self._history: deque[tuple[float, bytes]] = deque()
 
     # -- lifecycle -------------------------------------------------------------------
     @staticmethod
@@ -152,6 +158,10 @@ class Player:
                 if self._first_audio_t is None:
                     self._first_audio_t = now
                 self._last_audio_t = now
+                self._history.append((now, chunk))
+                horizon = now - self.played_history_s
+                while self._history and self._history[0][0] < horizon:
+                    self._history.popleft()
         if samples:
             outdata[:samples, 0] = np.frombuffer(chunk[: samples * 2], dtype=np.int16)
         if samples < frames:
@@ -209,6 +219,11 @@ class Player:
         """perf_counter() of the most recent device callback, real audio or silence."""
         with self._lock:
             return self._last_callback_t
+
+    def played_since(self, t: float) -> list[tuple[float, bytes]]:
+        """Blocks handed to the device at or after perf_counter ``t`` (newest last)."""
+        with self._lock:
+            return [item for item in self._history if item[0] >= t]
 
     @property
     def buffered_samples(self) -> int:

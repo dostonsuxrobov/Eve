@@ -14,6 +14,7 @@ Three small, dependency-free helpers shared by the pipeline and the TTS provider
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 # Cues the persona prompt offers. Keys are what the brain writes; values are the
@@ -220,16 +221,46 @@ def looks_incomplete(text: str) -> bool:
 _WORDS_RE = re.compile(r"[\w']+", re.UNICODE)
 
 
-def looks_like_echo(text: str, spoken: str, *, min_words: int = 3, max_words: int = 12, min_overlap: float = 0.8) -> bool:
+def echo_similarity(text: str, spoken: str) -> float:
+    """0..1: how much ``text`` resembles some stretch of ``spoken`` (character-level).
+
+    The STT garbles Eva's own voice coming back through the speakers ("когда придёшь к
+    решению" came back as "А когда придёшь к ней, шей"), so exact word runs miss it.
+    This slides a window of about the transcript's length over what she said and takes
+    the best :class:`difflib.SequenceMatcher` ratio.
+    """
+    words = _WORDS_RE.findall(text.lower())
+    said = _WORDS_RE.findall(spoken.lower())
+    if not words or not said:
+        return 0.0
+    target = " ".join(words)
+    best = 0.0
+    n = len(words)
+    for size in range(max(1, n - 2), n + 3):
+        for j in range(0, max(1, len(said) - size + 1)):
+            window = " ".join(said[j : j + size])
+            r = SequenceMatcher(None, target, window).ratio()
+            if r > best:
+                best = r
+                if best >= 0.99:
+                    return best
+    return best
+
+
+def looks_like_echo(
+    text: str, spoken: str, *, min_words: int = 3, max_words: int = 12, min_overlap: float = 0.8, fuzzy: float | None = None
+) -> bool:
     """True if a short transcript is (a piece of) what the agent itself just said.
 
     Through speakers the microphone hears the reply, and a mic's echo canceller takes
     the first seconds of a session to converge, so early on the STT can return
     Eva's own greeting ("What's on your mind today?") or a fragment of it. A
     transcript of ``min_words``..``max_words`` words that is, for at least
-    ``min_overlap`` of its length, a contiguous run of ``spoken`` is echo, not a turn.
-    One- and two-word transcripts are never judged: "not much" after "not much, you?"
-    is an answer.
+    ``min_overlap`` of its length, a contiguous run of ``spoken`` is echo, not a turn;
+    with ``fuzzy`` set, an :func:`echo_similarity` at or above it counts too (for
+    utterances that began while she was audible, where echo is the likely story).
+    One- and two-word transcripts are never judged by the exact rule: "not much" after
+    "not much, you?" is an answer.
     """
     words = _WORDS_RE.findall(text.lower())
     if len(words) < min_words or len(words) > max_words:
@@ -237,6 +268,8 @@ def looks_like_echo(text: str, spoken: str, *, min_words: int = 3, max_words: in
     said = _WORDS_RE.findall(spoken.lower())
     if len(said) < min_words:
         return False
+    if fuzzy is not None and echo_similarity(text, spoken) >= fuzzy:
+        return True
     # longest contiguous run of consecutive transcript words found consecutively in spoken
     best = 0
     for i in range(len(words)):
@@ -253,6 +286,7 @@ __all__ = [
     "CONTINUATION_WORDS",
     "HESITATIONS",
     "SUBTITLE_PHANTOMS",
+    "echo_similarity",
     "is_hesitation",
     "looks_incomplete",
     "looks_like_echo",

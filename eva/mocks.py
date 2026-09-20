@@ -98,6 +98,11 @@ class MockStreamingSTT(MockSTT):
         self.discards: list[dict[str, Any]] = []
         self.commit_cancelled: list[float] = []  # perf_counter of each commit() cancelled mid-flight
         self.last_batch_s: float | None = None  # latency of the last batch request (incl. a warmup probe), like the real STT
+        self.on_partial: Any = None  # the pipeline sets this; tests call emit_partial()
+
+    def emit_partial(self, text: str) -> None:
+        if self.on_partial is not None:
+            self.on_partial(text)
 
     async def feed(self, pcm: np.ndarray) -> None:
         self.feeds += 1

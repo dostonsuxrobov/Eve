@@ -92,9 +92,18 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 import numpy as np
 
+from .audio.echo import EchoDetector
 from .audio.envelope import fade_in, fade_out, silence, split_tail
 from .config import PipelineSettings
-from .delivery import detect_lang, extract_cue, is_hesitation, looks_hallucinated, looks_incomplete, looks_like_echo
+from .delivery import (
+    detect_lang,
+    echo_similarity,
+    extract_cue,
+    is_hesitation,
+    looks_hallucinated,
+    looks_incomplete,
+    looks_like_echo,
+)
 from .interfaces import (
     LLM,
     MIC_SAMPLE_RATE,
@@ -129,6 +138,13 @@ LLM_KEEPALIVE_S = 15.0  # ping the LLM's pooled connection after this much LLM i
 TOOL_CANCELLED_RESULT = "cancelled: the user interrupted before the tool finished; do not assume it ran"
 FILLER_TTS_GRACE_S = 0.6  # extra wait before a filler when a TTS request is already running
 ECHO_WINDOW_S = 2.0  # an utterance starting this soon after her audio ended may be her own echo
+ECHO_PARTIAL_SIM = 0.6  # a partial / final transcript this similar to what she is saying is her echo
+ECHO_MIN_WORD_LEN = 3  # partial words shorter than this are not evidence of a person talking
+LATE_COMMIT_TIMEOUT_S = 2.0  # an unconfirmed onset that ended: wait this long for its final text
+ECHO_STORM_COUNT = 3  # echo-classified utterances within ECHO_STORM_WINDOW_S ...
+ECHO_STORM_WINDOW_S = 20.0
+ECHO_STORM_HOLD_S = 30.0  # ... make barge-in demand the final transcript for this long
+_LETTERS_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 EMPTY_REPLY_PREFILL = "Mm."
 EMPTY_REPLY_TEXT = "Hm, sorry, I lost my train of thought there. Say that again?"
 LLM_FAILURE_TEXT = "Sorry, I'm having trouble thinking right now. Give me a moment and try again."
@@ -435,6 +451,18 @@ class VoiceAgent:
         self._pending_utterance: Any | None = None
         self._last_spoken = ""  # what she said last (heard part), for the self-echo gate
         self._last_audio_end: float | None = None
+        self._audible_since: float | None = None  # when the current SPEAKING state began
+        # barge-in while she is audible: evidence gathered per VAD onset (see _check_barge_in)
+        self._partial = ""  # latest partial transcript from the streaming STT for this onset
+        self._cand_echo_hits = 0
+        self._cand_echo_checks = 0
+        self._cand_echo_reported = False
+        self._late_task: asyncio.Task[None] | None = None
+        self._echo_times: deque[float] = deque()
+        self._storm_until = 0.0
+        self._echo: EchoDetector | None = (
+            EchoDetector(player, MIC_SAMPLE_RATE) if settings.echo_detector and callable(getattr(player, "played_since", None)) else None
+        )
         # Whisper-class STTs invent phrases on silence; Scribe / Parakeet do not (see eva.delivery)
         self._whisper_class = "whisper" in str(getattr(stt, "name", "")).lower()
         self._stopping = False
@@ -442,6 +470,11 @@ class VoiceAgent:
 
         # streaming STT (feed while the user talks, commit at the endpoint)
         self.stt_streaming = all(callable(getattr(stt, m, None)) for m in ("feed", "commit", "discard"))
+        if self.stt_streaming:
+            try:
+                stt.on_partial = self._on_partial  # type: ignore[attr-defined]
+            except Exception:  # an STT without partials: barge-in falls back to the wait rule
+                pass
         ring_ms = settings.prespeech_buffer_ms + settings.min_speech_ms + STREAM_RING_EXTRA_MS
         self._recent: deque[np.ndarray] = deque(maxlen=max(1, math.ceil(ring_ms / 20)))
         self._stream_open = False  # frames are being fed to the STT right now
@@ -523,6 +556,8 @@ class VoiceAgent:
                     fed |= await self._on_vad_event(ev)
                 if self._stream_open and not fed:
                     await self._stt_feed(frame)
+                if self._echo is not None:
+                    self._echo.push_mic(frame)
                 if self.settings.backchannels:
                     self._maybe_backchannel(frame_ms=1000.0 * len(frame) / 16_000)
                 if self._barge_candidate is not None:
@@ -655,15 +690,26 @@ class VoiceAgent:
                 # every utterance with up to prespeech_buffer_ms of ring audio and keeps a
                 # 150 ms tail, so duration_s is >= ~0.5 s for any blip that got this far
                 speech_ms = float(getattr(ev, "speech_ms", 0.0) or 0.0) or ev.duration_s * 1000
-                if speech_ms >= self.settings.barge_in_min_speech_ms:
+                if speech_ms < self.settings.barge_in_min_speech_ms:
+                    self._emit(
+                        "barge_in_ignored",
+                        {"reason": "blip", "duration_s": round(float(ev.duration_s), 3), "speech_ms": round(speech_ms, 1)},
+                    )
+                    await self._stt_discard(keep_audio=False)
+                elif not self._needs_words():
                     await self._interrupt("barge-in", t_trigger=ev.t)
                     await self._start_voice_turn(ev, streamed=streamed)
                 else:
-                    self._emit(
-                        "barge_in_ignored",
-                        {"duration_s": round(float(ev.duration_s), 3), "speech_ms": round(speech_ms, 1)},
-                    )
-                    await self._stt_discard(keep_audio=False)
+                    # she is audible and the onset never proved itself: decide on the final text
+                    verdict = self._words_verdict()
+                    if verdict == "user":
+                        await self._interrupt("barge-in", t_trigger=ev.t)
+                        await self._start_voice_turn(ev, streamed=streamed)
+                    elif verdict == "echo" or not streamed:
+                        self._note_echo("barge_in_ignored", {"reason": "echo", "partial": self._partial[:80], "echo_ratio": self._echo_ratio()})
+                        await self._stt_discard(keep_audio=False)
+                    else:
+                        self._late_check(ev)
             else:
                 # response in flight, barge-in disabled: answer it after this turn (in batch)
                 self._pending_utterance = ev
@@ -672,6 +718,9 @@ class VoiceAgent:
             return False
         # SpeechStart
         self._last_speech_start = float(ev.t)
+        self._partial = ""
+        self._cand_echo_hits = self._cand_echo_checks = 0
+        self._cand_echo_reported = False
         self._emit("speech_start", {"state": self.state.value})
         if self._response is not None and self.settings.barge_in:
             self._barge_candidate = float(ev.t)
@@ -715,12 +764,115 @@ class VoiceAgent:
             return
         speaking_ms = self.segmenter.speaking_ms
         min_ms = self.settings.barge_in_min_speech_ms
-        if speaking_ms >= min_ms:
-            # the moment the user had spoken exactly min_ms (segmenters may count speech
-            # from before they emit SpeechStart, so derive it from speaking_ms itself)
-            t_trigger = _now() - (speaking_ms - min_ms) / 1000.0
-            self._barge_candidate = None
-            await self._interrupt("barge-in", t_trigger=t_trigger)
+        if speaking_ms < min_ms:
+            return
+        if self._needs_words():
+            if self._echo is not None:
+                v = self._echo.check()
+                self._cand_echo_checks += 1
+                self._cand_echo_hits += int(v.is_echo)
+            verdict = self._words_verdict(speaking_ms=speaking_ms)
+            if verdict != "user":
+                if verdict == "echo" and not self._cand_echo_reported:
+                    self._cand_echo_reported = True
+                    self._emit("barge_in_echo", {"partial": self._partial[:80], "echo_ratio": self._echo_ratio(), "speaking_ms": round(speaking_ms)})
+                return  # keep listening: the evidence may still turn into a person talking
+        # the moment the user had spoken exactly min_ms (segmenters may count speech
+        # from before they emit SpeechStart, so derive it from speaking_ms itself)
+        t_trigger = _now() - (speaking_ms - min_ms) / 1000.0
+        self._barge_candidate = None
+        await self._interrupt("barge-in", t_trigger=t_trigger)
+
+    # ------------------------------------------------- barge-in while she is audible
+    def _on_partial(self, text: str) -> None:
+        self._partial = text or ""
+
+    def _needs_words(self) -> bool:
+        """True while she is audible and the words rule is on: a VAD onset is not enough."""
+        turn = self._response
+        if turn is None or self.settings.barge_in_confirm != "words":
+            return False
+        return bool(turn.audio_started or turn.filler_samples)
+
+    def _reply_text(self) -> str:
+        """What she is saying in the current turn (all chunks so far) plus the filler phrases."""
+        turn = self._response
+        parts = [j.raw for j in turn.chunks if j.raw] if turn is not None else []
+        return " ".join(parts + list(self._fillers_text))
+
+    def _echo_ratio(self) -> float | None:
+        if not self._cand_echo_checks:
+            return None
+        return round(self._cand_echo_hits / self._cand_echo_checks, 2)
+
+    def _words_verdict(self, *, speaking_ms: float | None = None) -> str:
+        """``"user"`` (a person is talking over her), ``"echo"`` (the mic hears the speakers)
+        or ``"unknown"`` (no evidence yet), from the partial transcript and the echo detector."""
+        ratio = self._echo_ratio()
+        signal_echo = ratio is not None and self._cand_echo_checks >= 3 and ratio >= 0.6
+        if not self.stt_streaming:
+            # no partials to read: the echo detector is the only evidence there is
+            return "echo" if signal_echo else "user"
+        words = [w for w in _LETTERS_RE.findall(self._partial) if len(w) >= ECHO_MIN_WORD_LEN]
+        if words:
+            if echo_similarity(self._partial, self._reply_text()) >= ECHO_PARTIAL_SIM or is_hesitation(self._partial):
+                return "echo"
+            if signal_echo:
+                return "echo"
+            if _now() < self._storm_until:
+                return "unknown"  # in a storm only the final transcript may interrupt her
+            return "user"
+        if signal_echo:
+            return "echo"
+        if speaking_ms is not None and speaking_ms >= self.settings.barge_in_words_wait_ms and _now() >= self._storm_until:
+            return "user"  # sustained speech and a silent STT: assume a person
+        return "unknown"
+
+    def _late_check(self, ev: Any) -> None:
+        """The onset ended before proving itself: fetch its final transcript, then decide.
+
+        She keeps talking meanwhile. A real interjection ("wait!") that the partials
+        missed interrupts her a few hundred milliseconds late; her echo is dropped.
+        """
+        if self._late_task is not None and not self._late_task.done():
+            self._late_task.cancel()
+        self._late_task = asyncio.create_task(self._late_check_run(ev), name="eva-late-bargein")
+
+    async def _late_check_run(self, ev: Any) -> None:
+        try:
+            tr = await asyncio.wait_for(self.stt.commit(), timeout=LATE_COMMIT_TIMEOUT_S)  # type: ignore[attr-defined]
+        except (asyncio.TimeoutError, Exception) as e:
+            self._emit("barge_in_ignored", {"reason": f"late text unavailable: {type(e).__name__}"})
+            await self._stt_discard(keep_audio=False)
+            return
+        text = (tr.text or "").strip()
+        words = [w for w in _LETTERS_RE.findall(text) if len(w) >= ECHO_MIN_WORD_LEN]
+        reply = self._reply_text() or self._last_spoken
+        if not words or is_hesitation(text) or echo_similarity(text, reply) >= ECHO_PARTIAL_SIM:
+            self._note_echo("barge_in_ignored", {"reason": "echo (final)", "text": text[:80]})
+            return
+        turn = self._response
+        if turn is None:
+            return  # she finished meanwhile: it is answered as a normal turn below
+        await self._interrupt("barge-in (late)", t_trigger=float(ev.t))
+        lang = detect_lang(text, default=self._user_lang)
+        if lang != self._user_lang:
+            self._select_lang(lang)
+            self._emit("language", {"lang": lang})
+        metrics = TurnMetrics(speech_start=self._last_speech_start, speech_end=float(ev.t))
+        self._emit("stt", {"text": text, "latency_s": round(tr.latency_s, 3), "samples": int(len(ev.pcm)), "mode": "stream", "fallback": None})
+        self._launch(_Turn(metrics=metrics, kind="voice", user_text=text))
+
+    def _note_echo(self, event: str, data: dict[str, Any]) -> None:
+        """Record an echo classification; three within ECHO_STORM_WINDOW_S start a storm."""
+        now = _now()
+        self._echo_times.append(now)
+        while self._echo_times and now - self._echo_times[0] > ECHO_STORM_WINDOW_S:
+            self._echo_times.popleft()
+        self._emit(event, data)
+        if len(self._echo_times) >= ECHO_STORM_COUNT and now >= self._storm_until:
+            self._storm_until = now + ECHO_STORM_HOLD_S
+            self._emit("echo_storm", {"hold_s": ECHO_STORM_HOLD_S, "count": len(self._echo_times)})
 
     async def _start_voice_turn(self, ev: Any, *, streamed: bool = False) -> None:
         pcm = np.asarray(ev.pcm, dtype=np.int16)
@@ -839,9 +991,11 @@ class VoiceAgent:
             return ""
         if self._last_spoken and self._last_audio_end is not None:
             started = turn.metrics.speech_start if turn.metrics.speech_start is not None else turn.started_at
-            if started - self._last_audio_end < ECHO_WINDOW_S and looks_like_echo(text, self._last_spoken):
+            near = started - self._last_audio_end < ECHO_WINDOW_S
+            during = self._audible_since is not None and started >= self._audible_since - 0.2
+            if (near or during) and looks_like_echo(text, self._last_spoken, min_words=2, fuzzy=ECHO_PARTIAL_SIM):
                 # the mic heard her own reply through the speakers (echo canceller still converging)
-                self._emit("stt_echo", {"text": text, "spoken": self._last_spoken})
+                self._note_echo("stt_echo", {"text": text, "spoken": self._last_spoken})
                 return ""
         lang = detect_lang(text, default=self._user_lang)
         if lang != self._user_lang:
@@ -1444,6 +1598,8 @@ class VoiceAgent:
 
     async def _shutdown(self) -> None:
         self._stopping = True
+        if self._late_task is not None and not self._late_task.done():
+            self._late_task.cancel()
         turn = self._response
         if turn is not None and turn.task is not None and not turn.task.done():
             turn.cancelled = True
@@ -1476,6 +1632,11 @@ class VoiceAgent:
         if new is self.state:
             return
         old, self.state = self.state, new
+        if new is State.SPEAKING:
+            self._audible_since = _now()
+        elif old is State.SPEAKING:
+            self._last_audio_end = _now()
+            self._audible_since = None
         seg = self.segmenter
         if seg is not None and self.settings.echo_guard:
             if new is State.SPEAKING and self._base_threshold is None:

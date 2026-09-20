@@ -199,8 +199,18 @@ Kokoro presets cost nothing.
   tail is not verified: it would take many more Cerebras turns than the quota allows; the one run
   after the change had TTFT 0.34-0.61 s on its three turns and pings of 0.47-0.75 s. The filler
   covers a tail when it happens, but it is audible.
-* The echo guard is a threshold bump, not echo cancellation: loud speakers can still trigger a false
-  barge-in or mask a real one. Use headphones.
+* The echo guard is a threshold bump, not echo cancellation. On 2026-09-19 a live session on
+  speakers looped for twelve turns: her voice reached the mic, 300 ms of VAD "speech" cut her
+  off, Scribe transcribed the garbled residue ("когда придёшь к решению" came back as "А
+  когда придёшь к ней, шей"), and she answered herself. Since then a barge-in while she is
+  audible needs real words in the partial transcript that are not a fuzzy copy of her reply,
+  plus a clear verdict from the echo detector (`eva/audio/echo.py`: normalised
+  cross-correlation of the mic against what the player just played; on synthetic echo at
+  -20 dB it flags 96-100 % of frames with the lag recovered to within 20 ms, the user's own
+  voice 0 %). Not yet measured on the real speakers-to-mic path: the laptop's mic array has
+  its own echo canceller whose residual is what leaks, and how strongly that residual
+  correlates is unknown until a live session prints `echo_ratio` values. Headphones remain
+  the clean setup.
 * The memory summariser runs at Ctrl-C only; a crash loses the session's facts.
 * Voice list and account usage cannot be read with this key (`voices_read` / `user_read` missing),
   so `--voice` accepts only the hardcoded names or a raw id.

@@ -73,8 +73,16 @@ bench/scenarios.json                    eval scenarios, "lang": "en" | "ru"
   waited on, never answered; a transcript that is a run of what she just said (the mic hearing
   her through the speakers) is dropped; the phantom-transcript filter built for Whisper is applied
   only to Whisper-class STTs, so "yeah", "no", "bye" are real answers on Scribe.
-* **Barge-in** on 300 ms of confirmed speech: the player stops within a block, only the words you
-  actually heard stay in the history, marked `[interrupted]`.
+* **Barge-in** on 300 ms of confirmed speech while she is thinking; while she is *audible*,
+  speech alone is not enough, because through speakers her own voice reaches the mic (a
+  session looped twelve turns on that: she cut herself off, transcribed the garbled echo,
+  answered it). Now the streaming transcript must show your words, they must not be a fuzzy
+  copy of what she is saying, and the echo detector (`eva/audio/echo.py`, which correlates the
+  mic with what the player just played) must not hear the speakers. A short interjection the
+  partials missed is checked on its final transcript and interrupts her a few hundred
+  milliseconds late. The player stops within a block; only the words you actually heard stay in
+  the history, marked `[interrupted]`. Three echo classifications in twenty seconds make her
+  ask for headphones and demand a full transcript before any interruption for thirty seconds.
 * **Fillers and backchannels**: "mm, hang on" if nothing is audible 800 ms after you stop;
   "mm-hm" at a breath inside a long story (headphones).
 * **Delivery**: the brain starts about every other sentence with a cue (`[warm] [soft] [teasing]`
