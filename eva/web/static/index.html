@@ -67,8 +67,8 @@
     registerProcessor("cap", Cap);`;
   const playWorklet = `
     class Play extends AudioWorkletProcessor {
-      // A jitter buffer: hold `pre` seconds before a reply starts, and after the queue runs dry
-      // mid-reply hold `re` seconds before resuming, so a Wi-Fi hiccup is one short pause instead
+      // A jitter buffer: hold "pre" seconds before a reply starts, and after the queue runs dry
+      // mid-reply hold "re" seconds before resuming, so a Wi-Fi hiccup is one short pause instead
       // of a stutter. "eot" (end of the reply) or 400 ms without new data drains whatever is held.
       constructor() { super(); this.q = []; this.off = 0; this.queued = 0; this.played = 0; this.tone = 0; this.lp = 0;
         this.pre = 0.25 * sampleRate; this.re = 0.15 * sampleRate; this.need = this.pre; this.playing = false;

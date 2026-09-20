@@ -217,3 +217,33 @@ def test_echo_detector_separates_speaker_echo_from_the_user() -> None:
     assert flagged < 0.15 and score < 0.3
     score, _, flagged = _echo_scores(0.0, 0.0)  # silence
     assert flagged == 0.0
+
+
+# ------------------------------------------------------------------ phone page
+def test_web_page_scripts_parse() -> None:
+    """The page is one file with two AudioWorklets inlined as template strings; a stray
+    backtick inside one once made the whole script fail to parse (the Start button did
+    nothing). Check with node when it is installed; always check for backticks."""
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+
+    import pytest
+
+    html = (Path(__file__).resolve().parent.parent / "eva" / "web" / "static" / "index.html").read_text(encoding="utf-8")
+    script = re.search(r"<script>(.*)</script>", html, re.S).group(1)
+    worklets = {name: re.search(name + r" = `(.*?)`;", script, re.S).group(1) for name in ("captureWorklet", "playWorklet")}
+    for name, body in worklets.items():
+        assert "`" not in body, f"backtick inside the {name} template string"
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed: syntax check skipped")
+    d = Path(tempfile.mkdtemp())
+    (d / "main.js").write_text(script, encoding="utf-8")
+    assert subprocess.run([node, "--check", str(d / "main.js")], capture_output=True, text=True).returncode == 0
+    shim = "const sampleRate=48000, currentTime=0; class AudioWorkletProcessor{constructor(){this.port={postMessage(){}}}}; function registerProcessor(){}\n"
+    for name, body in worklets.items():
+        (d / f"{name}.js").write_text(shim + body, encoding="utf-8")
+        r = subprocess.run([node, "--check", str(d / f"{name}.js")], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[:300]
