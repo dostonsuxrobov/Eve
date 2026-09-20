@@ -164,6 +164,16 @@ class WebServer:
             self._busy = False
             self.printer("web_client", {"peer": str(peer), "state": "gone"})
 
+    _last_stats: dict[str, Any] = {}
+
+    def _phone_stats(self, m: dict[str, Any]) -> None:
+        """Print the phone's playback numbers when they change (drops, hold) or every ~10 s."""
+        key = (m.get("drops"), m.get("hold_ms"))
+        now = time.time()
+        if key != self._last_stats.get("key") or now - self._last_stats.get("t", 0) >= 10:
+            self._last_stats = {"key": key, "t": now}
+            self.printer("phone_stats", m)
+
     async def _conversation(self, ws: ServerConnection) -> None:
         s = self.session
         # the client's hello decides the settings: without browser echo cancelling the
@@ -219,6 +229,8 @@ class WebServer:
                 kind = m.get("type")
                 if kind == "ping":
                     await ws.send(json.dumps({"type": "pong", "t": m.get("t")}))
+                    if "drops" in m:
+                        self._phone_stats(m)
                 elif kind == "stopped":
                     player.note_stopped(int(m.get("played") or 0))
                 elif kind == "interrupt":

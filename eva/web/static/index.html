@@ -57,10 +57,18 @@
   $("buf").textContent = "buffer: " + Math.round(BUF * 1000) + " ms";
   $("aec").onclick = (e) => { e.preventDefault(); params.set("aec", AEC ? "0" : "1"); location.search = params.toString(); };
   $("buf").onclick = (e) => { e.preventDefault(); const next = BUF < 0.3 ? 0.35 : BUF < 0.5 ? 0.6 : BUF < 0.9 ? 1.0 : 0.2; params.set("buf", String(next)); location.search = params.toString(); };
-  let rtt = null, lastStats = { queued: 0, underruns: 0, pre: 0 };
+  let rtt = null, lastStats = { queued: 0, underruns: 0, pre: 0 }, rtts = [], hold = BUF;
+  const AUTO = !params.get("buf");  // no explicit buffer: size the hold from the measured jitter
   function showStats() {
-    $("stats").textContent = "buffer " + Math.round(lastStats.queued * 1000) + " ms" + (lastStats.pre ? " (hold " + Math.round(lastStats.pre * 1000) + ")" : "")
+    $("stats").textContent = "buffer " + Math.round(lastStats.queued * 1000) + " ms (hold " + Math.round(hold * 1000) + (AUTO ? " auto" : "") + ")"
       + " · drops " + lastStats.underruns + (rtt !== null ? " · rtt " + Math.round(rtt) + " ms" : "");
+  }
+  function adaptHold() {
+    // the hold covers the worst recent round-trip spread, twice, with a floor of 350 ms and a ceiling of 1.2 s
+    if (!AUTO || rtts.length < 3) return;
+    const jitter = Math.max(...rtts) - Math.min(...rtts);
+    const want = Math.min(1.2, Math.max(0.35, 0.35 + 2 * jitter / 1000));
+    if (Math.abs(want - hold) > 0.05 && playNode) { hold = want; playNode.port.postMessage({ prebuffer: hold }); showStats(); }
   }
 
   function line(cls, text) {
@@ -167,7 +175,7 @@
       ws.send(JSON.stringify({ type: "hello", sampleRate: ctx.sampleRate, ua: navigator.userAgent, aec: AEC, prebufferS: BUF }));
       running = true; stopBtn.disabled = false; endBtn.disabled = false; setStatus("listening (mic " + ctx.sampleRate + " Hz)");
       playNode.port.postMessage({ prebuffer: BUF });
-      setInterval(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ping", t: performance.now() })); }, 2000);
+      setInterval(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ping", t: performance.now(), buffer_ms: Math.round(lastStats.queued * 1000), hold_ms: Math.round(hold * 1000), drops: lastStats.underruns, rtt_ms: rtt === null ? null : Math.round(rtt), aec: AEC })); }, 2000);
       micNode.port.onmessage = (e) => { if (ws.readyState === 1) ws.send(e.data.pcm); meterbar.style.width = Math.min(100, e.data.peak * 300) + "%"; };
     };
     ws.onmessage = (e) => {
@@ -183,7 +191,7 @@
   function onEvent(m) {
     if (m.type === "config") { outRate = m.sampleRate; if (playNode) { playNode.port.postMessage({ roomTone: m.roomToneDbfs === undefined ? null : m.roomToneDbfs }); if (m.prebufferS) playNode.port.postMessage({ prebuffer: m.prebufferS }); } return; }
     if (m.type === "eot") { if (playNode) playNode.port.postMessage({ eot: true }); return; }
-    if (m.type === "pong") { rtt = performance.now() - m.t; showStats(); return; }
+    if (m.type === "pong") { rtt = performance.now() - m.t; rtts.push(rtt); if (rtts.length > 10) rtts.shift(); adaptHold(); showStats(); return; }
     if (m.type === "stop") { playNode.port.postMessage({ flush: true }); return; }
     if (m.type === "busy") { line("warn", "another client is connected; try again in a moment"); return; }
     if (m.type !== "event") return;
