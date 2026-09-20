@@ -20,7 +20,6 @@ USER_AGENT = "eva-voice-agent/0.1"
 # before falling back. Always use the IPv4 literal.
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
-OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # ElevenLabs premade voice IDs (the key lacks voices_read, so we hardcode).
 EL_VOICES: dict[str, str] = {
@@ -52,14 +51,12 @@ def _read_key(filename: str, env: str) -> str | None:
 class Keys:
     cerebras: str | None
     elevenlabs: str | None
-    openai: str | None = None
 
 
 def load_keys() -> Keys:
     return Keys(
         cerebras=_read_key("cerebras_api_key.txt", "CEREBRAS_API_KEY"),
         elevenlabs=_read_key("elevenlabs_key.txt", "ELEVENLABS_API_KEY"),
-        openai=_read_key("openAI_api.txt", "OPENAI_API_KEY"),
     )
 
 
@@ -120,22 +117,18 @@ class Preset:
     tts_fallback: dict[str, Any] | None = None
 
 
-# The three brains that won their metric in docs/EVAL_REPORT.md (sections 3 and 10); every
-# other candidate measured (gpt-oss-120b, qwen3:4b, qwen2.5-coder:7b, gpt-5.4-nano,
-# gpt-5.6-luna / -terra) is recorded there and lives in git history.
+# The brain is Cerebras qwen-3.8-27b (decided 2026-09-19 after the live comparison: "much
+# more natural by much larger margins"). Every other candidate measured, cloud and local, is in
+# docs/EVAL_REPORT.md sections 3 and 10 and in git history. `local` is not a choice of brain: it
+# is the on-device fallback when Cerebras is unreachable, and the `local` offline preset.
 #   Cerebras "reasoning": "low" / "medium" / "high" -> reasoning_effort. "none" ->
 #       disable_reasoning (faster first token, but qwen then truncates 25-40 % of very short
 #       replies mid-word, section 6). max_tokens 800 so a long think never empties the reply.
-#   OpenAI "reasoning": "none" (gpt-5.1+) / "minimal" (gpt-5.0): no thinking before a reply.
 #   Ollama brains run on the native API with thinking off (eva/llm/ollama_native.py).
 BRAINS: dict[str, dict[str, Any]] = {
-    # speed + honesty: 6.2/10, 6/6 tools, 0.30 s TTFT, ~$0.003 per exchange. The default.
+    # 6.2/10, 6/6 tools, 0.30 s TTFT, about $0.003 per exchange ($0.99 / $1.49 per M tokens)
     "qwen": {"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
-    # conversation: 8.0/10 ("That stings a bit, even if you're pretending it doesn't"), 0.49 s TTFT,
-    # the tersest replies; costs real money per turn (about 2k prompt tokens each)
-    "gpt": {"kind": "openai", "model": "gpt-5.4-mini", "reasoning": "none"},
-    # on-device: 3.7/10 as a companion but 6/6 on tool calls with correct arguments, 0.18 s
-    # TTFT; the `local` preset and the fallback brain when Cerebras is unreachable
+    # qwen3:8b: 3.7/10 as a companion but 6/6 on tool calls; the fallback brain and the offline preset
     "local": {"kind": "ollama", "model": "qwen3:8b"},
 }
 DEFAULT_BRAIN = "qwen"
@@ -176,12 +169,9 @@ def _maya(name: str, brain: str, blurb: str) -> Preset:
     )
 
 
-# Three versions of the same agent, one per brain (docs/EVAL_REPORT.md sections 3 and 10), plus
-# the fully offline stack. `--brain` can still override any preset's brain.
+# The agent, plus the fully offline stack (the same providers the agent falls back to).
 PRESETS: dict[str, Preset] = {
     "maya": _maya("maya", "qwen", "Brain: Cerebras qwen-3.8-27b (6.2/10, 0.30 s to first token, about $0.003 per exchange)."),
-    "maya-gpt": _maya("maya-gpt", "gpt", "Brain: OpenAI gpt-5.4-mini, reasoning off (8.0/10, 0.49 s, about $0.0005-0.002 per exchange)."),
-    "maya-local": _maya("maya-local", "local", "Brain: Ollama qwen3:8b on this laptop, thinking off (3.7/10 as a companion, 6/6 on tools, free)."),
     "local": Preset(
         name="local",
         description=(

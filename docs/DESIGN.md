@@ -35,7 +35,7 @@ eva/
   pipeline.py        the conversation loop: VAD -> STT -> LLM -> chunker -> TTS -> player
   delivery.py        delivery cues ([warm]...), EN/RU detection, phantom / hesitation / echo gates
   mocks.py           doubles + the harness helpers used by tests/ and bench/
-run.py               CLI entry: `python run.py --user-name Doston [--lang ru] [--preset local] [--brain gpt]`
+run.py               CLI entry: `python run.py --user-name Doston [--lang ru] [--preset local]`
 tests/               pytest, offline (pipeline scenarios on doubles, failover, units)
 bench/               e2e_sim.py (real providers, --outage), conversation_eval.py + scenarios.json, summarize_e2e.py
 docs/                DESIGN.md (this), MEASUREMENTS.md (numbers, known issues), EVAL_REPORT.md

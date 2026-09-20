@@ -17,7 +17,6 @@ from .config import (
     CEREBRAS_BASE_URL,
     EL_VOICES,
     OLLAMA_BASE_URL,
-    OPENAI_BASE_URL,
     Keys,
     Preset,
 )
@@ -67,7 +66,7 @@ def build_llm(cfg: dict[str, Any], keys: Keys) -> LLM:
         extra: dict[str, Any] = {}
         reasoning = cfg.get("reasoning")
         if model.startswith("gpt-oss"):
-            # gpt-oss always reasons; low is the fastest setting (not a brain any more, kept for --brain overrides via config)
+            # gpt-oss always reasons; low is the fastest setting (measured and dropped; via config only)
             extra["reasoning_effort"] = reasoning if reasoning in ("low", "medium", "high") else "low"
         elif reasoning in (None, "none", "off", False):
             extra["disable_reasoning"] = True
@@ -96,24 +95,6 @@ def build_llm(cfg: dict[str, Any], keys: Keys) -> LLM:
             max_tokens=cfg.get("max_tokens", 300),
             temperature=cfg.get("temperature", 0.8),
             options=cfg.get("options"),
-        )
-    if kind == "openai":
-        assert keys.openai, "OpenAI key missing (openAI_api.txt or OPENAI_API_KEY)"
-        model = cfg["model"]
-        reasoning_model = model.startswith(("gpt-5", "o1", "o3", "o4")) and "chat-latest" not in model
-        extra: dict[str, Any] = {}
-        if reasoning_model:
-            # "none" (5.1+) / "minimal" (5.0): the least thinking; a voice turn cannot wait for more
-            extra["reasoning_effort"] = cfg.get("reasoning", "minimal")
-        return OpenAICompatLLM(
-            name=f"openai/{model}",
-            base_url=cfg.get("base_url", OPENAI_BASE_URL),
-            api_key=keys.openai,
-            model=model,
-            extra_body=extra,
-            max_tokens=cfg.get("max_tokens", 400),
-            temperature=None if reasoning_model else cfg.get("temperature", 0.8),
-            token_param="max_completion_tokens",
         )
     if kind == "openai-compat":
         return OpenAICompatLLM(

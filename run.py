@@ -4,7 +4,7 @@
     .venv/Scripts/python.exe run.py --user-name Doston            # the cloud stack (preset maya)
     .venv/Scripts/python.exe run.py --lang ru                     # locked to Russian
     .venv/Scripts/python.exe run.py --preset local                # everything on this laptop
-    .venv/Scripts/python.exe run.py --brain gpt-oss               # another Cerebras brain
+    .venv/Scripts/python.exe run.py --preset local                # everything on this laptop
     .venv/Scripts/python.exe run.py --list-devices
     .venv/Scripts/python.exe run.py --text          # type instead of talk (Eva still speaks)
     .venv/Scripts/python.exe run.py --once "hey eva, how's it going"   # one typed turn, then exit

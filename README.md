@@ -15,9 +15,7 @@ Windows 11 laptop (RTX 4050 6 GB, Python 3.13). Not built for scale.
 ## Run
 
 ```
-.venv\Scripts\python.exe run.py --user-name Doston             # preset maya: Cerebras qwen-3.8-27b brain, auto language
-.venv\Scripts\python.exe run.py --preset maya-gpt               # same ears and voice, OpenAI gpt-5.4-mini brain
-.venv\Scripts\python.exe run.py --preset maya-local             # same ears and voice, Ollama qwen3:8b brain (free)
+.venv\Scripts\python.exe run.py --user-name Doston             # preset maya, auto language
 .venv\Scripts\python.exe run.py --preset local                 # everything on this laptop, offline
 .venv\Scripts\python.exe run.py --user-name Doston --lang ru   # locked to Russian
 .venv\Scripts\python.exe run.py --text                         # type instead of talk (she still speaks)
@@ -31,35 +29,25 @@ are when the mic's echo canceller is still converging. `--no-greeting`, `--mute-
 `--no-barge-in`, `--no-fallback` (don't load the local backups), `--persona calm_coach`,
 `--voice`, `--input-device` / `--output-device`, `--debug`.
 
-## The presets: three brains on one stack, plus offline
+## The stack
 
-| preset | STT | brain | TTS | eval | first token | brain cost per exchange |
-|---|---|---|---|---|---|---|
-| `maya` (default) | ElevenLabs Scribe v2 realtime | Cerebras `qwen-3.8-27b`, reasoning low | ElevenLabs v3 + Flash first chunk, `eva_en` / `eva_ru` | 6.2/10, tools 6/6 | 0.30 s | ~$0.003 ($0.99 / $1.49 per M in / out) |
-| `maya-gpt` | same | OpenAI `gpt-5.4-mini`, reasoning off | same | 8.0/10, tools 5/6 | 0.49 s | ~$0.002 uncached, ~$0.0005 once the prompt prefix is cached ($0.75 / $4.50 per M, cached input $0.075) |
-| `maya-local` | same | Ollama `qwen3:8b`, thinking off (27 % on CPU) | same | 3.7/10, tools 6/6 | 0.18 s (1-3 s on a cold prompt or a tool call) | electricity |
-| `local` | Parakeet TDT 0.6B int8 (sherpa-onnx) | Ollama `qwen3:8b` | Kokoro (ONNX, CPU) | 3.7/10 | 0.18 s | nothing, offline |
+| preset | STT | brain | TTS |
+|---|---|---|---|
+| `maya` (default) | ElevenLabs Scribe v2 realtime (streams while you talk) | Cerebras `qwen-3.8-27b`, reasoning low | ElevenLabs v3 with delivery cues, Flash for the first chunk; `eva_en` / `eva_ru` voices |
+| `local` | Parakeet TDT 0.6B int8 (sherpa-onnx) | Ollama `qwen3:8b`, thinking off | Kokoro (ONNX, CPU) |
 
-An exchange is 2,800-4,300 prompt tokens (persona + tools + memory + up to 30 history
-messages) and 40-150 completion tokens, at the sample cadence of 12-15 s per exchange (about
-270 an hour): roughly **$0.95 an hour** on `maya`, **$0.15-0.60 an hour** on `maya-gpt`
-(caching decides), **$0** on the local brains. The brain is not the big line: ElevenLabs
-(Scribe per minute of audio, v3/Flash per character) costs more per hour than any of them.
-Prices from the providers' pages on 2026-09-19 (Cerebras: $0.99/$1.49 per M tokens; OpenAI:
-$0.75/$4.50, cached input $0.075); check them before relying on the numbers.
+The brain is qwen-3.8-27b on Cerebras: 6.2/10 in the eval, 6/6 on tool calls, 0.30 s to the
+first token, about $0.003 per exchange ($0.99 / $1.49 per M tokens in / out, 2026-09-19). An
+exchange is 2,800-4,300 prompt tokens and 40-150 output tokens, so an hour of talking (about
+270 exchanges) is roughly $0.95 of brain; ElevenLabs (Scribe per minute of audio, v3 / Flash per
+character) costs more per hour than that. Every other brain measured, cloud and local, is in
+`docs/EVAL_REPORT.md` (sections 3 and 10) and in git history; the live comparison on
+2026-09-19 settled it ("much more natural by much larger margins").
 
-The three `maya-*` presets carry the `local` providers as **fallbacks**: when a cloud request
-cannot start or gives no first result in time, that turn is served locally, the cloud provider is
-marked down for 20 s and probed again after (`eva/failover.py`; the console says so). The
-backups are warmed in the background after the cloud providers, so startup is not delayed.
-
-**Brains** (`--brain`, `eva/config.py: BRAINS`), the three that won their metric in
-`docs/EVAL_REPORT.md`: `qwen` (Cerebras qwen-3.8-27b: 6.2/10, 6/6 on tool calls, 0.30 s to
-first token; the default), `gpt` (OpenAI gpt-5.4-mini with reasoning off:
-8.0/10, the tersest and most Maya-like replies, 0.49 s, costs money per turn), and `local`
-(Ollama qwen3:8b with thinking off: 3.7/10 as a companion but 6/6 on tool calls; the offline
-preset and the fallback). gpt-oss-120b, qwen3:4b, qwen2.5-coder:7b, gpt-5.4-nano and
-gpt-5.6-luna/terra were measured and dropped (report sections 3 and 10).
+`maya` carries the `local` providers as **fallbacks**: when a cloud request cannot start or
+gives no first result in time, that turn is served locally, the cloud provider is marked down for
+20 s and probed again after (`eva/failover.py`; the console says so). The backups are warmed in
+the background after the cloud providers, so startup is not delayed.
 
 ## Languages
 
@@ -108,9 +96,8 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 ```
 
 Do not build the venv on the Microsoft Store Python (`AppData\Local\Microsoft\WindowsApps`):
-Windows denies audio capture to that packaged app. Keys: `cerebras_api_key.txt`,
-`elevenlabs_key.txt` and, for `--brain gpt`, `openAI_api.txt` in the project root (or
-`CEREBRAS_API_KEY` / `ELEVENLABS_API_KEY` / `OPENAI_API_KEY`); all gitignored.
+Windows denies audio capture to that packaged app. Keys: `cerebras_api_key.txt` and
+`elevenlabs_key.txt` in the project root (or `CEREBRAS_API_KEY` / `ELEVENLABS_API_KEY`); gitignored.
 Ollama must be running with `qwen3:8b` pulled for the `local` preset and
 the fallback brain. Models for Parakeet, Kokoro and the Silero VAD live under `models/`.
 
