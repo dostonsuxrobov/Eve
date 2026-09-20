@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 """Eva CLI - talk to the voice agent.
 
-    .venv/Scripts/python.exe run.py --preset cloud-fast --persona eva
+    .venv/Scripts/python.exe run.py --user-name Doston            # the cloud stack (preset maya)
+    .venv/Scripts/python.exe run.py --lang ru                     # locked to Russian
+    .venv/Scripts/python.exe run.py --preset local                # everything on this laptop
+    .venv/Scripts/python.exe run.py --brain gpt-oss               # another Cerebras brain
     .venv/Scripts/python.exe run.py --list-devices
     .venv/Scripts/python.exe run.py --text          # type instead of talk (Eva still speaks)
     .venv/Scripts/python.exe run.py --once "hey eva, how's it going"   # one typed turn, then exit
@@ -20,7 +23,6 @@ import logging
 import sys
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -30,7 +32,8 @@ sys.path.insert(0, str(ROOT))
 from rich.console import Console  # noqa: E402
 from rich.markup import escape  # noqa: E402
 
-from eva.config import MEMORY_FILE, PRESETS, PipelineSettings, load_keys  # noqa: E402
+from eva.config import BRAINS, DEFAULT_PRESET, MEMORY_FILE, PRESETS, PipelineSettings, load_keys  # noqa: E402
+from eva.lang import modes as lang_modes  # noqa: E402
 
 console = Console(highlight=False)
 log = logging.getLogger("eva.run")
@@ -38,9 +41,11 @@ log = logging.getLogger("eva.run")
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--preset", default="cloud-fast", choices=sorted(PRESETS), help="which stack to run")
+    ap.add_argument("--preset", default=DEFAULT_PRESET, choices=sorted(PRESETS), help="which stack to run")
+    ap.add_argument("--brain", choices=sorted(BRAINS), help="LLM override (default: the preset's)")
     ap.add_argument("--persona", help="persona name (default: the preset's)")
     ap.add_argument("--voice", help="TTS voice override (ElevenLabs name/id or Kokoro voice)")
+    ap.add_argument("--no-fallback", action="store_true", help="do not load the local backups (Parakeet / Ollama / Kokoro)")
     ap.add_argument("--list-devices", action="store_true", help="print audio devices and exit")
     ap.add_argument("--input-device", type=int)
     ap.add_argument("--output-device", type=int)
@@ -50,7 +55,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--user-name")
     ap.add_argument("--mute-fillers", action="store_true", help="no 'hmm' while thinking")
     ap.add_argument("--no-greeting", action="store_true", help="don't have her say hello when the session starts")
-    ap.add_argument("--lang", default="en", choices=["en", "ru"], help="language of the opening greeting and fillers (she follows you afterwards)")
+    ap.add_argument("--lang", default="auto", choices=lang_modes(), help="auto: follow you, switching per sentence; en / ru: lock the session to one language")
     ap.add_argument("--debug", action="store_true", help="verbose logging + every pipeline event")
     return ap.parse_args(argv)
 
@@ -72,6 +77,27 @@ class StatusPrinter:
             console.print(f"[bold cyan]you:[/] {escape(data['text'])}  [dim]{data['latency_s']:.2f}s[/]")
         elif name == "stt_empty":
             console.print("[dim]  (nothing to transcribe)[/]")
+        elif name == "stt_phantom":
+            console.print(f"[dim]  (ignored as noise: {escape(data['reason'])})[/]")
+        elif name == "stt_hesitation":
+            console.print("[dim]  (just a hesitation, waiting for you)[/]")
+        elif name == "stt_echo":
+            console.print("[dim]  (that was my own voice through the mic, ignored)[/]")
+        elif name == "stt_incomplete":
+            console.print(f"[dim]  (sounds unfinished, giving you {data['grace_ms']} ms)[/]")
+        elif name == "utterance_carried":
+            console.print("[dim]  (holding that, go on...)[/]")
+        elif name == "stt_commit_timeout":
+            console.print(f"[dim]  (transcription slow: no answer in {data['after_s']:.1f}s, retrying in batch)[/]")
+        elif name == "stt_fallback":
+            console.print(f"[dim]  (batch transcription took {data['latency_s']:.2f}s)[/]")
+        elif name == "language":
+            console.print(f"[dim]  (switching to {data['lang']})[/]")
+        elif name == "failover":
+            if data.get("first", True):
+                console.print(f"[yellow]{data['kind']}: {escape(data['from'])} not answering ({escape(data['reason'])}); using {escape(data['to'])}[/]")
+        elif name == "recovered":
+            console.print(f"[green]{data['kind']}: {escape(data['name'])} is back[/]")
         elif name == "filler":
             console.print(f"[dim]  (filler #{data['index']} at +{data['after_s']:.2f}s)[/]")
         elif name == "tool_call":
@@ -140,12 +166,8 @@ async def stdin_lines() -> AsyncIterator[str]:
 
 # ---------------------------------------------------------------- session
 async def amain(args: argparse.Namespace) -> int:
-    from eva.factory import build_llm, build_stt, build_tts
-    from eva.memory import Memory
-    from eva.personas import load_persona, render
     from eva.pipeline import VoiceAgent
-    from eva.tools import get_tools
-    from eva.tools import tool_notes as _tool_notes
+    from eva.session import build_session
 
     preset = PRESETS[args.preset]
     settings: PipelineSettings = dataclasses.replace(preset.settings)
@@ -160,29 +182,20 @@ async def amain(args: argparse.Namespace) -> int:
     keys = load_keys()
 
     console.print(f"[bold]Eva[/] preset [cyan]{preset.name}[/]: {preset.description}")
-    tts_cfg = dict(preset.tts)
-    if args.voice:
-        tts_cfg["voice"] = args.voice
-    stt = build_stt(preset.stt, keys)
-    llm = build_llm(preset.llm, keys)
-    tts = build_tts(tts_cfg, keys)
-
-    persona = load_persona(args.persona or preset.persona)
-    memory = Memory(MEMORY_FILE)
-    memory.load()
-    tools = get_tools()
-    system_prompt = render(
-        persona,
-        supports_audio_tags=tts.supports_audio_tags,
-        memory_text=memory.as_prompt_text(),
-        now=datetime.now().strftime("%A %d %B %Y, %H:%M"),
-        user_name=args.user_name or "",
-        tool_notes=_tool_notes(tools),
-        delivery_cues=bool(getattr(tts, "supports_cues", False)),
+    printer = StatusPrinter(debug=args.debug)
+    session = build_session(
+        preset, keys, lang=args.lang, brain=args.brain, persona=args.persona, user_name=args.user_name or "",
+        voice=args.voice, fallbacks=not args.no_fallback, mute_fillers=args.mute_fillers, on_event=printer,
     )
-    fillers = {} if args.mute_fillers else persona.fillers_by_lang()
-    tool_hints = persona.tool_hints_by_lang()
-    backchannels = persona.backchannels_by_lang() if settings.backchannels else {}
+    stt, llm, tts = session.stt, session.llm, session.tts
+    plan, memory = session.plan, session.memory
+    if session.dropped_facts:
+        # A misheard "my name is ..." or the assistant saying the name once used to end
+        # up in memory as "The user's name is Doster." / "Has a friend named Doston."
+        console.print(f"[dim]memory: dropped {len(session.dropped_facts)} stale name fact(s): {escape('; '.join(session.dropped_facts))}[/]")
+    if plan.locked and session.persona.lang != plan.mode:
+        console.print(f"[dim]no {plan.mode} version of persona {session.persona.name!r}; using the English prompt with a locked-language rule[/]")
+    console.print(f"[dim]language: {plan.mode} | persona: {session.persona.name} ({session.persona.lang}) | brain: {llm.name}[/]")
 
     # Open the audio devices BEFORE any network warmup: a missing/denied microphone
     # should fail fast without spending API calls or leaving warmup tasks dangling.
@@ -223,27 +236,26 @@ async def amain(args: argparse.Namespace) -> int:
         stt,
         llm,
         tts,
-        system_prompt,
-        tools,
+        session.system_prompt,
+        session.tools,
         settings,
         frames=frames,
         segmenter=segmenter,
         player=player,
-        fillers=fillers,
-        tool_hints=tool_hints,
-        backchannels=backchannels,
-        on_event=StatusPrinter(debug=args.debug),
+        fillers=session.fillers,
+        tool_hints=session.tool_hints,
+        backchannels=session.backchannels,
+        on_event=printer,
     )
     t0 = time.perf_counter()
     await agent.prepare()
-    if hasattr(agent, "_select_lang"):
-        agent._select_lang(args.lang)
-    if fillers:
-        n = sum(len(v) for v in fillers.values())
+    agent._select_lang(plan.primary.code)
+    if session.fillers:
+        n = sum(len(v) for v in session.fillers.values())
         console.print(f"[dim]{n} fillers pre-rendered in {time.perf_counter() - t0:.2f}s[/]")
     if not args.no_greeting and not args.once:
         # She opens the conversation (one short LLM turn) instead of sitting in silence.
-        agent.pending_events.put_nowait({"type": "session_start", "user_name": args.user_name or "", "lang": args.lang})
+        agent.pending_events.put_nowait(session.greeting_event(args.user_name or ""))
         await agent.poll_pending_events()
     console.print("[dim]Ctrl-C to end the session" + (" | type and press Enter; an empty line interrupts her" if args.text else "; headphones recommended for barge-in") + "[/]")
 
@@ -277,7 +289,10 @@ async def amain(args: argparse.Namespace) -> int:
         if agent.messages:
             try:
                 with console.status("updating memory..."):
-                    await asyncio.wait_for(memory.update_from_transcript(llm, agent.messages), timeout=25)
+                    await asyncio.wait_for(
+                        memory.update_from_transcript(llm, agent.messages, user_name=args.user_name or ""),
+                        timeout=25,
+                    )
                 save = getattr(memory, "save", None)
                 if save is not None:
                     save()

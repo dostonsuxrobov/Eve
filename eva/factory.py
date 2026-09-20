@@ -1,21 +1,28 @@
 """Build STT / LLM / TTS instances from a preset's config dicts.
 
-Imports are lazy so that optional heavy dependencies (faster-whisper, sherpa-onnx,
-kokoro-onnx) are only loaded for the preset that needs them.
+Imports are lazy so that optional heavy dependencies (sherpa-onnx, kokoro-onnx) are
+only loaded for the stack that needs them.
 
 Constructor signatures below are the contract that each provider module must honor.
+:func:`build_stack` assembles a whole preset, wrapping each provider in its
+``eva.failover`` counterpart when the preset names a fallback.
 """
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from .config import (
+    BRAINS,
     CEREBRAS_BASE_URL,
     EL_VOICES,
     OLLAMA_BASE_URL,
     Keys,
+    Preset,
 )
 from .interfaces import LLM, STT, TTS
+
+EventHandler = Callable[[str, dict[str, Any]], None]
 
 
 def build_stt(cfg: dict[str, Any], keys: Keys) -> STT:
@@ -37,14 +44,6 @@ def build_stt(cfg: dict[str, Any], keys: Keys) -> STT:
             api_key=keys.elevenlabs,
             model_id=cfg.get("model_id", "scribe_v2_realtime"),
             language=cfg.get("language"),
-        )
-    if kind == "faster-whisper":
-        from .stt.faster_whisper_local import FasterWhisperSTT
-
-        return FasterWhisperSTT(
-            model=cfg.get("model", "base.en"),
-            device=cfg.get("device", "auto"),
-            compute_type=cfg.get("compute_type", "int8"),
         )
     if kind == "parakeet":
         from .stt.sherpa_parakeet import SherpaParakeetSTT
@@ -75,7 +74,7 @@ def build_llm(cfg: dict[str, Any], keys: Keys) -> LLM:
             extra["reasoning_effort"] = reasoning
         return OpenAICompatLLM(
             name=f"cerebras/{model}",
-            base_url=CEREBRAS_BASE_URL,
+            base_url=cfg.get("base_url", CEREBRAS_BASE_URL),
             api_key=keys.cerebras,
             model=model,
             extra_body=extra,
@@ -86,7 +85,7 @@ def build_llm(cfg: dict[str, Any], keys: Keys) -> LLM:
         model = cfg["model"]
         return OpenAICompatLLM(
             name=f"ollama/{model}",
-            base_url=OLLAMA_BASE_URL,
+            base_url=cfg.get("base_url", OLLAMA_BASE_URL),
             api_key="ollama",
             model=model,
             extra_body={},
@@ -119,7 +118,6 @@ def build_tts(cfg: dict[str, Any], keys: Keys) -> TTS:
             api_key=keys.elevenlabs,
             voice_id=voice_id,
             model_id=cfg.get("model_id", "eleven_flash_v2_5"),
-            mode=cfg.get("mode", "ws"),  # "ws" (stream-input websocket) or "http" (per-chunk stream)
             stability=cfg.get("stability"),
             similarity_boost=cfg.get("similarity_boost"),
             style=cfg.get("style"),
@@ -127,6 +125,7 @@ def build_tts(cfg: dict[str, Any], keys: Keys) -> TTS:
             voices_by_lang=by_lang or None,
             first_chunk_model=cfg.get("first_chunk_model"),
             continuity=cfg.get("continuity", True),
+            **({"level_dbfs": cfg["level_dbfs"]} if "level_dbfs" in cfg else {}),  # None turns leveling off
         )
     if kind == "kokoro":
         from .tts.kokoro_local import KokoroTTS
@@ -139,3 +138,46 @@ def build_tts(cfg: dict[str, Any], keys: Keys) -> TTS:
             lang=cfg.get("lang", "en-us"),
         )
     raise ValueError(f"unknown tts kind {kind!r}")
+
+
+@dataclass
+class Stack:
+    stt: STT
+    llm: LLM
+    tts: TTS
+
+
+def build_stack(
+    preset: Preset,
+    keys: Keys,
+    *,
+    brain: str | None = None,
+    stt_overrides: dict[str, Any] | None = None,
+    tts_overrides: dict[str, Any] | None = None,
+    fallbacks: bool = True,
+    on_event: EventHandler | None = None,
+) -> Stack:
+    """Build a preset's three providers.
+
+    ``brain`` picks an entry of ``config.BRAINS`` instead of the preset's LLM;
+    ``stt_overrides`` / ``tts_overrides`` are merged into the provider configs (the
+    language layer uses them for the STT hint and the voices). With ``fallbacks`` each
+    provider that has a ``*_fallback`` in the preset is wrapped in its ``eva.failover``
+    counterpart, which reports through ``on_event``.
+    """
+    stt_cfg = {**preset.stt, **(stt_overrides or {})}
+    llm_cfg = dict(BRAINS[brain]) if brain else dict(preset.llm)
+    tts_cfg = {**preset.tts, **(tts_overrides or {})}
+    stt = build_stt(stt_cfg, keys)
+    llm = build_llm(llm_cfg, keys)
+    tts = build_tts(tts_cfg, keys)
+    if fallbacks:
+        from .failover import FailoverLLM, FailoverSTT, FailoverTTS
+
+        if preset.stt_fallback and preset.stt_fallback["kind"] != stt_cfg["kind"]:
+            stt = FailoverSTT(stt, build_stt(preset.stt_fallback, keys), on_event=on_event)
+        if preset.llm_fallback and preset.llm_fallback != llm_cfg:
+            llm = FailoverLLM(llm, build_llm(preset.llm_fallback, keys), on_event=on_event)
+        if preset.tts_fallback and preset.tts_fallback["kind"] != tts_cfg["kind"]:
+            tts = FailoverTTS(tts, build_tts(preset.tts_fallback, keys), on_event=on_event)
+    return Stack(stt=stt, llm=llm, tts=tts)

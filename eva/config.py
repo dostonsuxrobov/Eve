@@ -102,6 +102,9 @@ class PipelineSettings:
 
 @dataclass
 class Preset:
+    """One runnable stack. ``*_fallback`` are provider configs used only when the primary
+    stops responding (see ``eva.failover``); ``None`` means no fallback."""
+
     name: str
     description: str
     stt: dict[str, Any]
@@ -109,121 +112,68 @@ class Preset:
     tts: dict[str, Any]
     persona: str = "eva"
     settings: PipelineSettings = field(default_factory=PipelineSettings)
+    stt_fallback: dict[str, Any] | None = None
+    llm_fallback: dict[str, Any] | None = None
+    tts_fallback: dict[str, Any] | None = None
 
 
-# LLM "reasoning" values for Cerebras (mapped by eva.factory.build_llm):
-#   "low" / "medium" / "high" -> reasoning_effort (the default for every qwen preset here).
-#   "none" (or None / "off")  -> disable_reasoning: true. Fastest content TTFT (0.29 s vs
-#       0.43 s median) but qwen-3.8-27b then ends 25-40 % of very short replies mid-word
-#       ("That stings a") and the broken text cascades through the history
+# The brains. Cerebras "reasoning" values (mapped by eva.factory.build_llm):
+#   "low" / "medium" / "high" -> reasoning_effort. gpt-oss-120b always reasons; low is its
+#       fastest setting.
+#   "none" (or None / "off")  -> disable_reasoning: true (qwen only). Fastest content TTFT
+#       (0.29 s vs 0.43 s median) but qwen-3.8-27b then ends 25-40 % of very short replies
+#       mid-word ("That stings a") and the broken text cascades through the history
 #       (docs/EVAL_REPORT.md section 6). Set it only if you accept that.
-# max_tokens is raised to 800 on the reasoning presets so that a long think can never
-# leave the reply empty (finish=length with 400 was measured 2/82 turns).
+# max_tokens is 800 on the reasoning brains so a long think can never leave the reply empty
+# (finish=length with 400 was measured 2/82 turns).
+BRAINS: dict[str, dict[str, Any]] = {
+    # the eval winner (docs/EVAL_REPORT.md: 6.00/10, passes every honesty check, 0.2-0.4 s TTFT)
+    "qwen": {"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
+    # bigger, but 3.50/10 in the eval: promises tools it lacks, leaks tool calls as JSON text
+    "gpt-oss": {"kind": "cerebras", "model": "gpt-oss-120b", "reasoning": "low", "max_tokens": 800},
+    # the on-device brain: the fallback when Cerebras is unreachable, and the `local` preset
+    "local": {"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M"},
+}
+DEFAULT_BRAIN = "qwen"
+
+# Local providers: the `local` preset and the fallbacks of the cloud preset.
+LOCAL_STT: dict[str, Any] = {"kind": "parakeet"}
+LOCAL_TTS: dict[str, Any] = {"kind": "kokoro", "voice": "af_heart"}
+
 PRESETS: dict[str, Preset] = {
-    # ---- the Maya-like family: user-picked voices, EN/RU switching, delivery cues ----
     "maya": Preset(
         name="maya",
         description=(
-            "Best effort at Maya: Scribe realtime STT, Cerebras qwen-3.8-27b, ElevenLabs v3 with "
+            "The cloud stack: Scribe realtime STT, Cerebras qwen-3.8-27b, ElevenLabs v3 with "
             "delivery tags on the eva_en / eva_ru voices, Flash for the first chunk so the reply "
-            "starts fast, prosodic continuity between sentences, backchannels (headphones)."
+            "starts fast, prosodic continuity between sentences, backchannels (headphones). "
+            "Falls back to Parakeet / Ollama qwen3:4b / Kokoro when a cloud service stops answering."
         ),
         stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
+        llm=dict(BRAINS[DEFAULT_BRAIN]),
         tts={
             "kind": "elevenlabs",
-            "voice": "eva_en",
-            "voices_by_lang": {"ru": "eva_ru"},
+            "voice": "eva_en",  # per-language voices come from eva/assets/lang/*.toml
             "model_id": "eleven_v3",
             "first_chunk_model": "eleven_flash_v2_5",
-            "mode": "http",
         },
         settings=PipelineSettings(
             endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
             first_chunk_min_chars=18, min_chunk_chars=10,
         ),
+        stt_fallback=dict(LOCAL_STT),
+        llm_fallback=dict(BRAINS["local"]),
+        tts_fallback=dict(LOCAL_TTS),
     ),
-    "maya-v3": Preset(
-        name="maya-v3",
-        description="maya with every chunk on ElevenLabs v3 (most expressive, ~0.5 s slower to start).",
-        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
-        tts={
-            "kind": "elevenlabs",
-            "voice": "eva_en",
-            "voices_by_lang": {"ru": "eva_ru"},
-            "model_id": "eleven_v3",
-            "mode": "http",
-        },
-        settings=PipelineSettings(
-            endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
-            first_chunk_min_chars=18, min_chunk_chars=10,
+    "local": Preset(
+        name="local",
+        description=(
+            "Everything on this laptop: Parakeet TDT 0.6B (sherpa-onnx) STT, Ollama qwen3:4b, "
+            "Kokoro TTS. Free, private, offline; a 2-3/10 conversation (docs/EVAL_REPORT.md)."
         ),
-    ),
-    "maya-fast": Preset(
-        name="maya-fast",
-        description="maya on ElevenLabs Flash only: fastest; delivery cues become voice settings per sentence.",
-        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
-        tts={
-            "kind": "elevenlabs",
-            "voice": "eva_en",
-            "voices_by_lang": {"ru": "eva_ru"},
-            "model_id": "eleven_flash_v2_5",
-            "mode": "http",
-        },
-        settings=PipelineSettings(
-            endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
-            first_chunk_min_chars=18, min_chunk_chars=10,
-        ),
-    ),
-    "cloud-fast": Preset(
-        name="cloud-fast",
-        description="ElevenLabs Scribe realtime STT + Cerebras qwen-3.8-27b (low reasoning) + ElevenLabs Flash. Lowest cloud latency.",
-        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
-        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
-    ),
-    "cloud-smart": Preset(
-        name="cloud-smart",
-        description="Same audio stack, Cerebras gpt-oss-120b with low reasoning. Smarter, a bit slower.",
-        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
-        llm={"kind": "cerebras", "model": "gpt-oss-120b", "reasoning": "low"},
-        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
-    ),
-    "expressive": Preset(
-        name="expressive",
-        description="Cerebras qwen + ElevenLabs v3 with audio tags ([laughs], [sighs]). Most emotional, highest TTS latency.",
-        stt={"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
-        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_v3", "mode": "http"},
-    ),
-    "local-brain": Preset(
-        name="local-brain",
-        description="Cloud audio (batch Scribe v2), local Ollama qwen3:4b brain. Tests how far a small local model gets.",
-        stt={"kind": "elevenlabs", "model_id": "scribe_v2"},
-        llm={"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M"},
-        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
-    ),
-    "local-stt": Preset(
-        name="local-stt",
-        description="Local faster-whisper STT + Cerebras + ElevenLabs. Removes one network hop.",
-        stt={"kind": "faster-whisper", "model": "base.en", "device": "cpu"},
-        llm={"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
-        tts={"kind": "elevenlabs", "voice": "sarah", "model_id": "eleven_flash_v2_5", "mode": "http"},
-    ),
-    "fully-local": Preset(
-        name="fully-local",
-        description="Everything on this laptop: faster-whisper + Ollama + Kokoro. Free, private, less natural voice.",
-        stt={"kind": "faster-whisper", "model": "base.en", "device": "cpu"},
-        llm={"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M"},
-        tts={"kind": "kokoro", "voice": "af_heart"},
-    ),
-    "parakeet-local": Preset(
-        name="parakeet-local",
-        description="Like fully-local but NVIDIA Parakeet (sherpa-onnx) for STT, which is faster and more accurate than whisper base.",
-        stt={"kind": "parakeet"},
-        llm={"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M"},
-        tts={"kind": "kokoro", "voice": "af_heart"},
+        stt=dict(LOCAL_STT),
+        llm=dict(BRAINS["local"]),
+        tts=dict(LOCAL_TTS),
     ),
 }
+DEFAULT_PRESET = "maya"

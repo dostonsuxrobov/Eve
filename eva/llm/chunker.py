@@ -9,8 +9,11 @@ the TTS as soon as they are complete:
 * Every later chunk is cut at a sentence ender ``. ! ? …`` (or a run of them such as
   ``?!`` / ``...``) or at a newline.
 * It does not split inside numbers (``3.5``), after common abbreviations (``Dr.``,
-  ``e.g.``), right after a single capital letter (``J. K.``), or inside an unclosed
-  ``[audio tag]``.
+  ``e.g.``), right after a single capital letter (``J. K.``), inside an unclosed
+  ``[audio tag]``, or inside an unclosed ``{``: gpt-oss leaks tool calls as JSON text
+  with commas and newlines in it, and kept whole the pipeline recovers the call instead
+  of speaking half of it.  A ``{`` left open for more than ``MAX_BRACE_HOLD`` characters
+  is ignored so a stray brace can never hold a reply back.
 * Chunks shorter than ``min_chunk_chars`` are merged into the next one ("Hi." +
   " How are you?" -> "Hi. How are you?"), except at :meth:`flush`.
 
@@ -21,6 +24,7 @@ of the buffer waits for the next delta or for :meth:`flush`.
 from __future__ import annotations
 
 _ENDERS = ".!?…"
+MAX_BRACE_HOLD = 400  # characters an unclosed "{" may hold a cut back
 _CLOSERS = "\"'”’)]»"
 _EARLY_CUTS = ",;—–"
 
@@ -97,8 +101,13 @@ class SentenceChunker:
 
     # ----------------------------------------------------------------- private
     def _balanced_brackets(self, upto: int) -> bool:
+        """No unclosed ``[`` before ``upto``, and no unclosed ``{`` within MAX_BRACE_HOLD."""
         seg = self._buf[:upto]
-        return seg.count("[") <= seg.count("]")
+        if seg.count("[") > seg.count("]"):
+            return False
+        if seg.count("{") > seg.count("}"):
+            return upto - seg.rfind("{") > MAX_BRACE_HOLD
+        return True
 
     def _is_abbreviation(self, end: int) -> bool:
         """True if the '.' at ``end`` follows an abbreviation or a lone capital letter."""
@@ -126,7 +135,7 @@ class SentenceChunker:
             c = buf[i]
             if c == "\n":
                 candidate = i + 1
-                if self._accept(candidate, hard=True):
+                if self._balanced_brackets(i) and self._accept(candidate, hard=True):
                     return candidate
                 i += 1
                 continue
@@ -185,7 +194,7 @@ class SentenceChunker:
                 continue
             if not self._emitted_first and c == "-" and i > 0 and buf[i - 1] == " ":
                 # spaced hyphen used as a dash: "well - I mean"
-                if len(buf[:i].strip()) >= self.first_chunk_min_chars:
+                if len(buf[:i].strip()) >= self.first_chunk_min_chars and self._balanced_brackets(i):
                     if i + 1 >= n:
                         self._scan = i
                         return None

@@ -262,7 +262,9 @@ def open_url(url: str) -> str:
 def end_conversation(reason: str = "") -> str:
     """Ask the pipeline to end the session after the current reply (the goodbye)."""
     pending_events.put_nowait({"type": "end_session", "reason": reason})
-    return "OK: the session ends right after this reply. Say a short, warm goodbye now."
+    # Only reached by the model when it called the tool without saying goodbye: the
+    # pipeline skips the round after a final tool whose call already carried the goodbye.
+    return "OK: the session ends right after this reply. Say one short, warm goodbye now, nothing else."
 
 
 _TOOLS: list[Tool] = [
@@ -279,6 +281,7 @@ _TOOLS: list[Tool] = [
         },
         fn=end_conversation,
         spoken_hint=None,
+        final=True,
     ),
     Tool(
         name="get_current_time",

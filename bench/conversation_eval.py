@@ -63,12 +63,25 @@ from eva.personas import list_personas, load_persona, now_string, render  # noqa
 OUT_DIR = ROOT / "bench" / "out"
 SCENARIOS_FILE = ROOT / "bench" / "scenarios.json"
 
-BRAINS: dict[str, dict[str, Any]] = {
-    "cerebras:qwen-3.8-27b": {"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "none"},
-    "cerebras:gpt-oss-120b": {"kind": "cerebras", "model": "gpt-oss-120b", "reasoning": "low"},
-    "ollama:qwen3:4b-instruct-2507-q4_K_M": {"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M"},
-}
-DEFAULT_PERSONAS = ["eva", "maya_like"]
+from eva.config import BRAINS as CONFIG_BRAINS  # noqa: E402
+
+# The brains as run.py names them (eva.config.BRAINS). The historical slugs of the
+# judged transcripts in bench/out/conv_*.json were "cerebras:qwen-3.8-27b" etc.
+BRAINS: dict[str, dict[str, Any]] = dict(CONFIG_BRAINS)
+DEFAULT_PERSONAS = ["eva"]
+
+# Russian stand-in memory and name for --lang ru (the same facts, so the judge lenses compare).
+BENCH_USER_NAME_RU = "Саша"
+BENCH_MEMORY_RU = "\n".join(
+    [
+        "- Зовут Саша.",
+        "- Есть кот Мисо, три года, любит сидеть на подоконнике.",
+        "- Сестра Прия живёт в другом городе; созваниваются по воскресеньям с мамой.",
+        "- Работает над редизайном онбординга, уже полгода.",
+        "- Хочет снова начать бегать.",
+    ]
+)
+LANG_NAMES = {"en": "English", "ru": "Russian"}
 
 # Stand-in memory so scenarios can test whether the model references known facts.
 BENCH_USER_NAME = "Sam"
@@ -269,7 +282,7 @@ _EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿⭐⭕️‍]")
 _TAG_RE = re.compile(r"\[(?:[a-z][a-z ]{1,20})\]", re.IGNORECASE)
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 _DIGIT_RE = re.compile(r"\d")
-_WORD_RE = re.compile(r"[A-Za-z0-9'’]+")
+_WORD_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)  # any script: "don't", "ничего"
 
 THERAPY_PHRASES = [
     "i hear you", "that's valid", "that is valid", "so valid", "totally valid", "completely valid",
@@ -753,12 +766,21 @@ def reanalyze(out_dir: Path = OUT_DIR) -> None:
 
 
 # ======================================================================= main
+def _prompt_for(persona_name: str, lang: str) -> str:
+    """The system prompt as the live pipeline would render it for ``lang`` (locked)."""
+    persona = load_persona(persona_name, lang=lang)
+    memory, user = (BENCH_MEMORY_RU, BENCH_USER_NAME_RU) if lang == "ru" else (BENCH_MEMORY, BENCH_USER_NAME)
+    return render(persona, supports_audio_tags=False, memory_text=memory, now=now_string(), user_name=user,
+                  tool_notes=BENCH_TOOL_NOTES, locked_language=LANG_NAMES.get(lang) if lang != "en" else None)
+
+
 async def run_one(brain: str, persona_name: str, scenarios: list[dict[str, Any]], *, max_tokens: int,
-                  temperature: float, client: str, parallel: int, quiet: bool, out_dir: Path) -> dict[str, Any]:
+                  temperature: float, client: str, parallel: int, quiet: bool, out_dir: Path,
+                  lang: str = "en") -> dict[str, Any]:
     cfg = BRAINS[brain]
-    persona = load_persona(persona_name)
-    system_prompt = render(persona, supports_audio_tags=False, memory_text=BENCH_MEMORY, now=now_string(),
-                           user_name=BENCH_USER_NAME, tool_notes=BENCH_TOOL_NOTES)
+    system_prompt = _prompt_for(persona_name, lang)
+    if lang != "en":
+        persona_name = f"{persona_name}_{lang}"  # separate output files per language
     display = "Eva"
     llm = make_llm(cfg, max_tokens=max_tokens, temperature=temperature, client=client)
     client_used = type(llm).__name__
@@ -796,8 +818,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--brain", default="all", help="one of %s, a comma list, or all" % ", ".join(BRAINS))
     ap.add_argument("--persona", default=",".join(DEFAULT_PERSONAS), help="persona name, comma list, or all")
-    ap.add_argument("--scenarios", default="all", help="all or a comma list of scenario ids")
-    ap.add_argument("--max-tokens", type=int, default=250)
+    ap.add_argument("--scenarios", default="all", help="all or a comma list of scenario ids (of the chosen --lang)")
+    ap.add_argument("--lang", default="en", choices=sorted(LANG_NAMES), help="which scenarios and persona language to run")
+    ap.add_argument("--max-tokens", type=int, default=800, help="800 like the presets: with reasoning on, 250 left replies empty")
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--client", choices=["auto", "inline", "factory"], default="factory",
                     help="factory (default) = the real eva.llm.openai_compat client via eva.factory.build_llm; "
@@ -827,7 +850,7 @@ async def amain(args: argparse.Namespace) -> int:
         print(f"unknown brain(s): {unknown}; choose from {list(BRAINS)}", file=sys.stderr)
         return 2
     personas = list_personas() if args.persona == "all" else [p.strip() for p in args.persona.split(",") if p.strip()]
-    scenarios = load_scenarios()
+    scenarios = [s for s in load_scenarios() if s.get("lang", "en") == args.lang]
     if args.scenarios != "all":
         want = {s.strip() for s in args.scenarios.split(",")}
         missing = want - {s["id"] for s in scenarios}
@@ -837,10 +860,8 @@ async def amain(args: argparse.Namespace) -> int:
         scenarios = [s for s in scenarios if s["id"] in want]
     if args.dry_run:
         for pn in personas:
-            p = load_persona(pn)
-            sp = render(p, supports_audio_tags=False, memory_text=BENCH_MEMORY, now=now_string(),
-                        user_name=BENCH_USER_NAME, tool_notes=BENCH_TOOL_NOTES)
-            print(f"--- persona {pn}: {len(sp.split())} words, ~{len(sp)//4} tokens ---")
+            sp = _prompt_for(pn, args.lang)
+            print(f"--- persona {pn} ({args.lang}): {len(sp.split())} words, ~{len(sp)//4} tokens ---")
             print(sp)
         print(f"brains: {brains}")
         for s in scenarios:
@@ -859,7 +880,7 @@ async def amain(args: argparse.Namespace) -> int:
             try:
                 s = await run_one(brain, pn, scenarios, max_tokens=args.max_tokens,
                                   temperature=args.temperature, client=args.client,
-                                  parallel=args.parallel, quiet=args.quiet, out_dir=out_dir)
+                                  parallel=args.parallel, quiet=args.quiet, out_dir=out_dir, lang=args.lang)
             except Exception as e:  # build / warmup / IO failure: record and move on
                 consecutive_failures += 1
                 failures.append({"brain": brain, "persona": pn, "error": f"{type(e).__name__}: {e}",

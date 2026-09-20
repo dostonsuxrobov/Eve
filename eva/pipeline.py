@@ -94,7 +94,7 @@ import numpy as np
 
 from .audio.envelope import fade_in, fade_out, silence, split_tail
 from .config import PipelineSettings
-from .delivery import detect_lang, extract_cue, looks_hallucinated, looks_incomplete
+from .delivery import detect_lang, extract_cue, is_hesitation, looks_hallucinated, looks_incomplete, looks_like_echo
 from .interfaces import (
     LLM,
     MIC_SAMPLE_RATE,
@@ -107,6 +107,9 @@ from .interfaces import (
     Transcript,
     TurnMetrics,
 )
+from .llm.chunker import SentenceChunker
+from .llm.sanitize import clean_for_tts
+from . import tools as tools_mod
 
 log = logging.getLogger("eva.pipeline")
 
@@ -125,6 +128,7 @@ STT_COMMIT_DEADLINE_FACTOR = 2.0  # ... but never sooner than this x the slowest
 LLM_KEEPALIVE_S = 15.0  # ping the LLM's pooled connection after this much LLM idleness (0 = off)
 TOOL_CANCELLED_RESULT = "cancelled: the user interrupted before the tool finished; do not assume it ran"
 FILLER_TTS_GRACE_S = 0.6  # extra wait before a filler when a TTS request is already running
+ECHO_WINDOW_S = 2.0  # an utterance starting this soon after her audio ended may be her own echo
 EMPTY_REPLY_PREFILL = "Mm."
 EMPTY_REPLY_TEXT = "Hm, sorry, I lost my train of thought there. Say that again?"
 LLM_FAILURE_TEXT = "Sorry, I'm having trouble thinking right now. Give me a moment and try again."
@@ -175,38 +179,12 @@ class PlayerLike(Protocol):
     async def wait_until_done(self) -> None: ...
 
 
-# --------------------------------------------------------- sibling-module resolvers
-def _resolve_chunker_factory(settings: PipelineSettings) -> Callable[[], Chunker]:
-    try:
-        from .llm.chunker import SentenceChunker  # type: ignore
-    except ImportError:
-        log.warning("eva.llm.chunker not available; using StandInChunker from eva.mocks")
-        from .mocks import StandInChunker as SentenceChunker  # type: ignore
+# ------------------------------------------------------------ default collaborators
+def _default_chunker_factory(settings: PipelineSettings) -> Callable[[], Chunker]:
     return lambda: SentenceChunker(
         first_chunk_min_chars=settings.first_chunk_min_chars,
-        min_chunk_chars=getattr(settings, "min_chunk_chars", 6),
+        min_chunk_chars=settings.min_chunk_chars,
     )
-
-
-def _resolve_sanitizer() -> Sanitizer:
-    try:
-        from .llm.sanitize import clean_for_tts  # type: ignore
-    except ImportError:
-        log.warning("eva.llm.sanitize not available; using standin_clean_for_tts from eva.mocks")
-        from .mocks import standin_clean_for_tts as clean_for_tts  # type: ignore
-    return clean_for_tts
-
-
-def _resolve_tools_runtime() -> tuple[ToolExecutor, "asyncio.Queue[dict[str, Any]]"]:
-    try:
-        from . import tools as tools_mod  # type: ignore
-
-        return tools_mod.execute, tools_mod.pending_events
-    except ImportError:
-        log.warning("eva.tools not available; using standin_execute and an empty event queue")
-        from .mocks import standin_execute
-
-        return standin_execute, asyncio.Queue()
 
 
 # ------------------------------------------------------------------ helpers
@@ -253,6 +231,7 @@ class _ThinkFilter:
 
 
 _JSON_OBJ_RE = re.compile(r"\{\s*\"[^{}]*(?:\{[^{}]*\}[^{}]*)*\}")
+_SPEAKABLE_RE = re.compile(r"[^\W_]", re.UNICODE)  # at least one letter or digit
 
 
 def _recover_tool_calls(text: str, tools: list[Tool], seq: list[int]) -> tuple[str, list[LLMToolCall]]:
@@ -382,8 +361,8 @@ class VoiceAgent:
     ``prepare()`` and played when nothing is audible ``filler_after_ms`` after the
     user stops; ``tool_hints`` are spoken while a tool without its own
     ``spoken_hint`` runs.  ``chunker_factory`` / ``sanitizer`` /
-    ``tool_executor`` / ``pending_events`` default to the sibling modules and fall
-    back to stand-ins when those are missing.
+    ``tool_executor`` / ``pending_events`` default to the sibling modules (tests inject
+    doubles).
     """
 
     def __init__(
@@ -418,14 +397,12 @@ class VoiceAgent:
         self.on_event = on_event
         self.max_turns = max_turns
 
-        self.chunker_factory = chunker_factory or _resolve_chunker_factory(settings)
-        self.sanitizer: Sanitizer = sanitizer or _resolve_sanitizer()
-        if tool_executor is None or pending_events is None:
-            ex, q = _resolve_tools_runtime()
-            tool_executor = tool_executor or ex
-            pending_events = pending_events if pending_events is not None else q
-        self.tool_executor: ToolExecutor = tool_executor
-        self.pending_events: "asyncio.Queue[dict[str, Any]]" = pending_events
+        self.chunker_factory = chunker_factory or _default_chunker_factory(settings)
+        self.sanitizer: Sanitizer = sanitizer or clean_for_tts
+        self.tool_executor: ToolExecutor = tool_executor or tools_mod.execute
+        self.pending_events: "asyncio.Queue[dict[str, Any]]" = (
+            pending_events if pending_events is not None else tools_mod.pending_events
+        )
 
         self.messages: list[dict[str, Any]] = []  # history without the system prompt
         self.turns: list[TurnMetrics] = []
@@ -456,6 +433,10 @@ class VoiceAgent:
         self._carry_pcm: np.ndarray | None = None
         self._carry_text: str | None = None
         self._pending_utterance: Any | None = None
+        self._last_spoken = ""  # what she said last (heard part), for the self-echo gate
+        self._last_audio_end: float | None = None
+        # Whisper-class STTs invent phrases on silence; Scribe / Parakeet do not (see eva.delivery)
+        self._whisper_class = "whisper" in str(getattr(stt, "name", "")).lower()
         self._stopping = False
         self.end_requested = False  # set by an end_session event (the end_conversation tool)
 
@@ -847,11 +828,21 @@ class VoiceAgent:
         if len(text) < MIN_TRANSCRIPT_CHARS:
             self._emit("stt_empty", {"text": text})
             return ""
-        reason = looks_hallucinated(text, tr.meta)
+        reason = looks_hallucinated(text, tr.meta, whisper_class=self._whisper_class)
         if reason is not None:
             # Noise, breaths and fan hum make Whisper-class models invent "Thank you." etc.
             self._emit("stt_phantom", {"text": text, "reason": reason})
             return ""
+        if is_hesitation(text):
+            # "Uh." / "Hmm.": thinking, not a turn. Answering it is the "ignoring me" feel.
+            self._emit("stt_hesitation", {"text": text})
+            return ""
+        if self._last_spoken and self._last_audio_end is not None:
+            started = turn.metrics.speech_start if turn.metrics.speech_start is not None else turn.started_at
+            if started - self._last_audio_end < ECHO_WINDOW_S and looks_like_echo(text, self._last_spoken):
+                # the mic heard her own reply through the speakers (echo canceller still converging)
+                self._emit("stt_echo", {"text": text, "spoken": self._last_spoken})
+                return ""
         lang = detect_lang(text, default=self._user_lang)
         if lang != self._user_lang:
             self._select_lang(lang)
@@ -972,7 +963,9 @@ class VoiceAgent:
             if not tool_calls:
                 final_text = round_text
                 break
-            if not turn.chunks:  # nothing spoken yet: cover the wait
+            final_call = self._is_final_call(tool_calls)
+            spoke_with_call = bool(round_text.strip())
+            if not turn.chunks and not final_call:  # nothing spoken yet: cover the wait
                 hint = self._hint_for(tool_calls)
                 if hint:
                     self._enqueue(turn, jobs, round_no, hint, is_hint=True)
@@ -1009,6 +1002,12 @@ class VoiceAgent:
                         self.messages.append({"role": "tool", "tool_call_id": tc.id, "content": TOOL_CANCELLED_RESULT})
                 raise
             round_no += 1
+            if final_call and spoke_with_call:
+                # end_conversation: the goodbye was said with the call. A round after the
+                # result would only say it a second time (measured: "Bye." ... "See you.").
+                self._emit("tool_round_final", {"names": [tc.name for tc in tool_calls]})
+                last_results = []
+                break
         if not final_text and last_results:
             # the model went quiet after the tool: read the result out instead of silence
             final_text = last_results[-1]
@@ -1109,6 +1108,8 @@ class VoiceAgent:
     ) -> None:
         cue, body = extract_cue(raw)
         text = self.sanitizer(body, self.tts.supports_audio_tags).strip()
+        if text and not _SPEAKABLE_RE.search(text):
+            text = ""  # brace / punctuation debris ("} }"): nothing to say, and ElevenLabs answers 400
         job = _ChunkJob(index=len(turn.chunks), round=round_no, raw=raw.strip(), text=text, is_hint=is_hint, cue=cue)
         turn.chunks.append(job)
         if job.silent:
@@ -1293,6 +1294,11 @@ class VoiceAgent:
         self.player.write(audio)
         self._emit("backchannel", {"index": self._backchannel_i - 1, "seconds": round(len(audio) / 2 / self.tts.sample_rate, 2)})
 
+    def _is_final_call(self, tool_calls: list[LLMToolCall]) -> bool:
+        """True if every call in the round is to a ``Tool.final`` tool (end_conversation)."""
+        by_name = {t.name: t for t in self.tools}
+        return bool(tool_calls) and all(getattr(by_name.get(tc.name), "final", False) for tc in tool_calls)
+
     def _hint_for(self, tool_calls: list[LLMToolCall]) -> str | None:
         """What to say while a tool runs: the tool's own hint, else a persona tool
         hint ("one sec"), else a filler phrase."""
@@ -1414,6 +1420,9 @@ class VoiceAgent:
                 return
         else:
             m.assistant_text = " ".join(j.raw for j in turn.chunks if j.raw)
+        if m.assistant_text.strip():
+            self._last_spoken = m.assistant_text
+            self._last_audio_end = m.audio_finished
         self.turns.append(m)
         self._turns_done += 1
         self._emit(
@@ -1528,7 +1537,7 @@ class VoiceAgent:
             return f"[system: reminder due: {ev.get('text') or ev.get('label')} - tell the user naturally]"
         if kind == "session_start":
             name = ev.get("user_name") or "them"
-            lang = {"ru": "Russian", "en": "English"}.get(str(ev.get("lang") or "en"), "English")
+            lang = str(ev.get("language") or {"ru": "Russian", "en": "English"}.get(str(ev.get("lang") or "en"), "English"))
             return (
                 f"[system: the conversation just started. Say hello to {name} in {lang}, one short "
                 "natural sentence, the way a friend picks up the phone; no 'how can I help', no task "

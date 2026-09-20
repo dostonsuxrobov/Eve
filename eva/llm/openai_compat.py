@@ -262,8 +262,9 @@ class OpenAICompatLLM:
         self.warmup_s = time.perf_counter() - t0
         log.info("%s warmup took %.3f s", self.name, self.warmup_s)
 
-    async def ping(self) -> float:
-        """Cheap keep-alive request (GET /models); returns seconds taken.
+    async def ping(self) -> float | None:
+        """Cheap keep-alive request (GET /models); returns seconds taken, or ``None`` if
+        the backend did not answer (the failover layer uses that to probe a dead primary).
 
         Call every ~60 s while idle so the pooled connection is not closed by the
         server's idle timeout; a stale socket costs a full reconnect on the next turn.
@@ -274,6 +275,7 @@ class OpenAICompatLLM:
             r.raise_for_status()
         except Exception as e:
             log.debug("%s ping failed: %s", self.name, e)
+            return None
         return time.perf_counter() - t0
 
     async def close(self) -> None:

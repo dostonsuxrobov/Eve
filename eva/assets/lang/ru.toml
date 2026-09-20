@@ -1,0 +1,9 @@
+# Russian. The local Kokoro voice has no Russian, so the local stack answers in English
+# audio for Russian text; the cloud stack switches to `voice` per sentence.
+code = "ru"
+name = "Russian"
+stt_language_code = "ru"
+voice = "eva_ru"
+fillers = ["мм", "хм", "так, секунду", "ага"]
+tool_hints = ["секунду", "сейчас гляну"]
+backchannels = ["угу", "ага", "да-да"]

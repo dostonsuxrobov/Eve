@@ -1,15 +1,13 @@
 #!/usr/bin/env python
-"""Per-preset median latency table from the ``bench/out/e2e_*.json`` files.
+"""Median latency per stage from ``bench/out/e2e_*.json`` (the simulator's output).
 
-    .venv/Scripts/python.exe bench/summarize_e2e.py            # the seven presets
-    .venv/Scripts/python.exe bench/summarize_e2e.py --variants # plus the cloud-fast experiments
+    .venv/Scripts/python.exe bench/summarize_e2e.py                 # every e2e_*.json, one row each
+    .venv/Scripts/python.exe bench/summarize_e2e.py --group preset  # rows merged per preset name
 
-Numbers are medians over every non-interrupted turn of the files that count for a
-preset (``cloud-fast`` = ``e2e_cloud-fast_run1..3.json``; the other presets their
-single ``e2e_<preset>.json``).  ``e2e_cloud-fast_race.json`` (batch request raced
-against the realtime commit), ``e2e_cloud-fast_run4.json`` and
-``e2e_cloud-fast_run5.json`` (both taken while the account's STT was throttled) are
-never used.  Every number is measured, nothing is estimated.
+Numbers are medians over every non-interrupted, error-free turn of a file. The
+historical per-preset tables from the selection phase (seven presets, transport
+variants, throttled runs) live in ``docs/MEASUREMENTS.md``; every number there was
+produced by the previous version of this script and is not recomputed here.
 """
 from __future__ import annotations
 
@@ -17,101 +15,52 @@ import argparse
 import json
 import statistics
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 OUT_DIR = Path(__file__).resolve().parent / "out"
 STAGES = ("stt", "llm_ttft", "tts_ttfa", "total")
-PRESET_FILES: dict[str, list[str]] = {
-    "cloud-fast": ["e2e_cloud-fast_run1.json", "e2e_cloud-fast_run2.json", "e2e_cloud-fast_run3.json"],
-    "cloud-smart": ["e2e_cloud-smart.json"],
-    "expressive": ["e2e_expressive.json"],
-    "local-stt": ["e2e_local-stt.json"],
-    "local-brain": ["e2e_local-brain.json"],
-    "fully-local": ["e2e_fully-local.json"],
-    "parakeet-local": ["e2e_parakeet-local.json"],
-}
-VARIANT_FILES: dict[str, list[str]] = {
-    "cloud-fast (tts ws)": ["e2e_cloud-fast_tts-ws.json"],
-    "cloud-fast (tts http)": ["e2e_cloud-fast_tts-http.json"],
-    "cloud-fast (real speakers)": ["e2e_cloud-fast_speakers.json"],
-    "cloud-fast (batch scribe_v1, old)": ["e2e_cloud-fast.json"],
-    "cloud-fast (bargein run)": ["e2e_cloud-fast_bargein.json"],
-    "cloud-fast run4 (throttled, excluded)": ["e2e_cloud-fast_run4.json"],
-    "cloud-fast race (excluded)": ["e2e_cloud-fast_race.json"],
-    "cloud-fast run5 (verification, STT throttled, excluded)": ["e2e_cloud-fast_run5.json"],
-}
 
 
-def load_turns(files: list[str]) -> tuple[list[dict], dict]:
-    turns: list[dict] = []
-    meta: dict = {}
-    for name in files:
-        path = OUT_DIR / name
-        if not path.exists():
-            print(f"missing {path}", file=sys.stderr)
-            continue
-        d = json.loads(path.read_text(encoding="utf-8"))
-        meta = {k: d.get(k) for k in ("stt", "llm", "tts")}
-        for t in d.get("turns", []):
-            if t.get("interrupted") or t.get("error") or t.get("total") is None:
-                continue
-            turns.append(t)
+def load(path: Path) -> tuple[list[dict], dict]:
+    d = json.loads(path.read_text(encoding="utf-8"))
+    meta = {k: d.get(k) for k in ("preset", "lang", "outage", "stt", "llm", "tts")}
+    turns = [t for t in d.get("turns", []) if not (t.get("interrupted") or t.get("error") or t.get("total") is None)]
     return turns, meta
 
 
-def summarize(label: str, files: list[str]) -> dict | None:
-    turns, meta = load_turns(files)
-    if not turns:
-        return None
-    row = {"preset": label, "n": len(turns), **meta}
-    for s in STAGES:
-        vals = [t[s] for t in turns if t.get(s) is not None]
-        row[s] = statistics.median(vals) if vals else None
-    row["max_total"] = max(t["total"] for t in turns)
-    stage_meds = {s: row[s] for s in ("stt", "llm_ttft", "tts_ttfa") if row[s] is not None}
-    row["dominant"] = max(stage_meds, key=stage_meds.get) if stage_meds else "?"
-    return row
-
-
-def fmt(v: float | None) -> str:
-    return "-" if v is None else f"{v:.2f}"
-
-
-def table(rows: list[dict]) -> str:
-    out = [
-        "| preset | turns | median response (s) | max (s) | STT (s) | LLM TTFT (s) | TTS TTFA (s) | dominant stage |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
-    for r in rows:
-        out.append(
-            f"| {r['preset']} | {r['n']} | **{fmt(r['total'])}** | {fmt(r['max_total'])} | {fmt(r['stt'])} | "
-            f"{fmt(r['llm_ttft'])} | {fmt(r['tts_ttfa'])} | {r['dominant']} |"
-        )
-    return "\n".join(out)
+def medians(turns: list[dict]) -> dict[str, float | None]:
+    out: dict[str, float | None] = {}
+    for st in STAGES:
+        vals = [float(t[st]) for t in turns if t.get(st) is not None]
+        out[st] = round(statistics.median(vals), 3) if vals else None
+    return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--variants", action="store_true", help="also print the cloud-fast experiment files")
-    ap.add_argument("--json", action="store_true", help="print rows as JSON instead of markdown")
+    ap.add_argument("--group", choices=["file", "preset"], default="file")
+    ap.add_argument("--out-dir", default=str(OUT_DIR))
     args = ap.parse_args()
-
-    rows = [r for r in (summarize(k, v) for k, v in PRESET_FILES.items()) if r]
-    if args.json:
-        print(json.dumps(rows, indent=1))
-        return 0
-    print(table(rows))
-    print()
-    print("Stack per preset (from the files):")
-    for k, files in PRESET_FILES.items():
-        _, meta = load_turns(files)
-        if meta:
-            print(f"- {k}: {meta.get('stt')} + {meta.get('llm')} + {meta.get('tts')}")
-    if args.variants:
-        print()
-        print("cloud-fast experiment files (not part of the table above):")
-        print()
-        print(table([r for r in (summarize(k, v) for k, v in VARIANT_FILES.items()) if r]))
+    files = sorted(Path(args.out_dir).glob("e2e_*.json"))
+    if not files:
+        print(f"no e2e_*.json under {args.out_dir}", file=sys.stderr)
+        return 1
+    groups: dict[str, list[dict]] = defaultdict(list)
+    metas: dict[str, dict] = {}
+    for f in files:
+        turns, meta = load(f)
+        key = meta.get("preset") or f.stem if args.group == "preset" else f.stem
+        groups[str(key)].extend(turns)
+        metas[str(key)] = meta
+    fmt = lambda v: "-" if v is None else f"{v:.3f}"  # noqa: E731
+    print(f"{'run':40} {'turns':>5} {'stt':>7} {'ttft':>7} {'ttfa':>7} {'total':>7}  stack")
+    for key, turns in groups.items():
+        m = medians(turns)
+        meta = metas[key]
+        stack = " + ".join(str(meta.get(k) or "?").split("/")[0] for k in ("stt", "llm", "tts"))
+        extra = f" [outage {','.join(meta['outage'])}]" if meta.get("outage") else ""
+        print(f"{key:40} {len(turns):5d} {fmt(m['stt']):>7} {fmt(m['llm_ttft']):>7} {fmt(m['tts_ttfa']):>7} {fmt(m['total']):>7}  {stack}{extra}")
     return 0
 
 

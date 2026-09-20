@@ -151,6 +151,9 @@ class Tool:
     parameters: dict[str, Any]  # JSON schema for the arguments object
     fn: Any  # sync or async callable(**arguments) -> str
     spoken_hint: str | None = None  # e.g. "let me check" spoken while the tool runs
+    # A final tool ends the reply (end_conversation): when the model already spoke
+    # alongside the call, no LLM round follows the result, and no hint covers it.
+    final: bool = False
 
     def openai_schema(self) -> dict[str, Any]:
         return {

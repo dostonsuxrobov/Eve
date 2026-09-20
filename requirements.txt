@@ -6,9 +6,9 @@ httpx
 websockets
 python-dotenv
 rich
-# local STT (optional)
-faster-whisper
-sherpa-onnx
-# local TTS (optional)
-kokoro-onnx
 soundfile
+# local stack (the `local` preset and the cloud preset's fallbacks)
+sherpa-onnx
+kokoro-onnx
+# dev
+pytest

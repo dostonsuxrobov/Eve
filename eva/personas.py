@@ -1,9 +1,11 @@
 """Persona loading and system-prompt rendering.
 
-Persona files live in ``eva/personas/*.md``.  Each one starts with a small front
-matter block between two ``---`` lines (``name``, ``description``,
-``suggested_voice``, ``fillers``, ``tool_hints``) followed by the system prompt
-template.  The template contains literal slots that :func:`render` fills:
+Persona files live in ``eva/assets/personas/<lang>/<name>.md``: one file per language,
+the English one being the reference and the fallback.  Each starts with a small front
+matter block between two ``---`` lines (``name``, ``description``, ``suggested_voice``
+and, optionally, ``fillers`` / ``tool_hints`` / ``backchannels`` that override the
+language's defaults from ``eva/assets/lang``) followed by the system prompt template.
+The template contains literal slots that :func:`render` fills:
 
     {user_name}        who Eva is talking to
     {now}              a human readable local timestamp
@@ -17,9 +19,10 @@ left untouched (no ``str.format`` surprises).
 Usage::
 
     from eva.personas import load_persona, render, now_string
-    p = load_persona("maya_like")
+    p = load_persona("eva", lang="ru")          # falls back to en/eva.md if there is no ru/
     system_prompt = render(p, supports_audio_tags=False, memory_text=mem.as_prompt_text(),
-                           now=now_string(), user_name="Sam", tool_notes=registry.notes())
+                           now=now_string(), user_name="Sam", tool_notes=registry.notes(),
+                           locked_language="Russian")
 """
 from __future__ import annotations
 
@@ -28,8 +31,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-PERSONAS_DIR = Path(__file__).resolve().parent / "personas"
+PERSONAS_DIR = Path(__file__).resolve().parent / "assets" / "personas"
 DEFAULT_PERSONA = "eva"
+DEFAULT_LANG = "en"
 
 TEMPLATE_SLOTS = ("user_name", "now", "memory", "audio_tags_rule", "tool_notes", "language_rule")
 _SLOT_RE = re.compile(r"\{(" + "|".join(TEMPLATE_SLOTS) + r")\}")
@@ -57,6 +61,10 @@ LANGUAGE_RULE = (
     "friend talks: informal, natural spoken Russian, short sentences, no anglicisms and no "
     "translated-sounding phrasing; if they switch languages, switch with them without comment."
 )
+LOCKED_LANGUAGE_RULE = (
+    "Language. This conversation is in {language}: always answer in {language}, even if a word "
+    "or a sentence from {user_name} comes through in another language."
+)
 AUDIO_TAGS_FORBIDDEN = (
     "Audio tags. Never write bracketed stage directions or sound tags like [laughs] or "
     "[sighs]; they'd be read aloud or dropped. Show feeling through word choice and "
@@ -73,67 +81,67 @@ NO_TOOLS_TEXT = "No tools are connected right now."
 
 @dataclass(frozen=True)
 class Persona:
-    """One loaded persona: front matter fields plus the raw prompt template."""
+    """One loaded persona file: front matter fields plus the raw prompt template.
+
+    ``lang`` is the directory the file came from; ``fillers`` / ``tool_hints`` /
+    ``backchannels`` are optional per-persona overrides of that language's defaults
+    (empty = use ``eva.lang``'s).
+    """
 
     name: str
     description: str
     suggested_voice: str
+    lang: str = DEFAULT_LANG
     fillers: list[str] = field(default_factory=list)
     tool_hints: list[str] = field(default_factory=list)
-    fillers_ru: list[str] = field(default_factory=list)
-    tool_hints_ru: list[str] = field(default_factory=list)
     backchannels: list[str] = field(default_factory=list)
-    backchannels_ru: list[str] = field(default_factory=list)
     template: str = ""
 
-    def fillers_by_lang(self) -> dict[str, list[str]]:
-        return {k: v for k, v in {"en": self.fillers, "ru": self.fillers_ru}.items() if v}
-
-    def tool_hints_by_lang(self) -> dict[str, list[str]]:
-        return {k: v for k, v in {"en": self.tool_hints, "ru": self.tool_hints_ru}.items() if v}
-
-    def backchannels_by_lang(self) -> dict[str, list[str]]:
-        return {k: v for k, v in {"en": self.backchannels, "ru": self.backchannels_ru}.items() if v}
-
     def slots_present(self) -> set[str]:
-        """Which of the five template slots this template actually uses."""
+        """Which of the template slots this template actually uses."""
         return set(_SLOT_RE.findall(self.template))
 
 
 # --------------------------------------------------------------------- loading
-def list_personas() -> list[str]:
-    """Names of every persona file in ``eva/personas``, sorted, default first."""
-    names = sorted(p.stem for p in PERSONAS_DIR.glob("*.md"))
+def list_personas(lang: str = DEFAULT_LANG) -> list[str]:
+    """Names of every persona file for ``lang`` (English by default), default first."""
+    names = sorted(p.stem for p in (PERSONAS_DIR / lang).glob("*.md"))
     if DEFAULT_PERSONA in names:
         names.remove(DEFAULT_PERSONA)
         names.insert(0, DEFAULT_PERSONA)
     return names
 
 
-def load_persona(name: str = DEFAULT_PERSONA) -> Persona:
-    """Load and parse ``eva/personas/<name>.md``.
+def persona_path(name: str, lang: str = DEFAULT_LANG) -> Path:
+    """``assets/personas/<lang>/<name>.md`` if it exists, else the English file."""
+    for code in (lang, DEFAULT_LANG):
+        path = PERSONAS_DIR / code / f"{name}.md"
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"persona {name!r} not found; available: {', '.join(list_personas())}")
+
+
+def load_persona(name: str = DEFAULT_PERSONA, lang: str = DEFAULT_LANG) -> Persona:
+    """Load and parse the persona ``name`` for ``lang`` (falling back to English).
 
     ``name`` may also be a path to a ``.md`` file outside the package.
     """
     path = Path(name)
-    if not (path.suffix == ".md" and path.exists()):
-        path = PERSONAS_DIR / f"{name}.md"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"persona {name!r} not found; available: {', '.join(list_personas())}"
-        )
+    if path.suffix == ".md" and path.exists():
+        code = path.parent.name if (PERSONAS_DIR / path.parent.name).is_dir() else lang
+    else:
+        path = persona_path(name, lang)
+        code = path.parent.name
     text = path.read_text(encoding="utf-8")
     meta, body = _split_front_matter(text)
     return Persona(
         name=str(meta.get("name") or path.stem),
         description=str(meta.get("description") or ""),
         suggested_voice=str(meta.get("suggested_voice") or "sarah"),
+        lang=code,
         fillers=_as_list(meta.get("fillers")),
         tool_hints=_as_list(meta.get("tool_hints")),
-        fillers_ru=_as_list(meta.get("fillers_ru")),
-        tool_hints_ru=_as_list(meta.get("tool_hints_ru")),
         backchannels=_as_list(meta.get("backchannels")),
-        backchannels_ru=_as_list(meta.get("backchannels_ru")),
         template=body.strip() + "\n",
     )
 
@@ -208,11 +216,14 @@ def render(
     user_name: str | None = None,
     tool_notes: str | None = None,
     delivery_cues: bool = False,
+    locked_language: str | None = None,
 ) -> str:
     """Fill the persona template and return the final system prompt.
 
     ``supports_audio_tags`` decides whether ``{audio_tags_rule}`` becomes permission
     to use a few ElevenLabs-v3 style tags or a rule to never write bracketed tags.
+    ``locked_language`` (a language name, e.g. "Russian") turns ``{language_rule}`` into
+    "always answer in <language>"; without it the bilingual follow-the-user rule is used.
     Empty or ``None`` ``memory_text`` / ``tool_notes`` / ``user_name`` / ``now`` get
     sensible fallbacks so the prompt never contains a dangling empty section.
     """
@@ -229,7 +240,11 @@ def render(
         "memory": (memory_text or "").strip() or NO_MEMORY_TEXT,
         "audio_tags_rule": delivery,
         "tool_notes": (tool_notes or "").strip() or NO_TOOLS_TEXT,
-        "language_rule": LANGUAGE_RULE.replace("{user_name}", name),
+        "language_rule": (
+            LOCKED_LANGUAGE_RULE.replace("{language}", locked_language).replace("{user_name}", name)
+            if locked_language
+            else LANGUAGE_RULE.replace("{user_name}", name)
+        ),
     }
     return _SLOT_RE.sub(lambda m: values[m.group(1)], persona.template)
 
@@ -243,6 +258,7 @@ __all__ = [
     "AUDIO_TAGS_FORBIDDEN",
     "list_personas",
     "load_persona",
+    "persona_path",
     "render",
     "now_string",
 ]

@@ -14,16 +14,19 @@ Also contains the *stand-ins* for sibling modules that may not exist yet
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
 import inspect
 import math
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import numpy as np
 
-from .interfaces import MIC_SAMPLE_RATE, LLMDelta, LLMDone, LLMToolCall, Tool, Transcript
+from .config import PipelineSettings
+from .interfaces import MIC_SAMPLE_RATE, LLMDelta, LLMDone, LLMToolCall, Tool, Transcript, TurnMetrics
 
 try:  # use the real event classes when the audio package is present
     from .audio.vad import SpeechEnd, SpeechStart  # type: ignore
@@ -530,3 +533,107 @@ async def standin_execute(call: LLMToolCall, tools: list[Tool]) -> str:
                 result = await result
             return str(result)
     return f"error: unknown tool {call.name!r}"
+
+
+# ------------------------------------------------------- test / bench harness
+# Shared by tests/test_pipeline.py and bench/e2e_sim.py.
+class EventLog:
+    """Collects pipeline events with timestamps; optional live printing."""
+
+    def __init__(self, verbose: bool = False, player: Any = None) -> None:
+        self.events: list[tuple[float, str, dict[str, Any]]] = []
+        self.verbose = verbose
+        self.player = player
+        self.t0 = time.perf_counter()
+        self.hooks: list[Callable[[str, dict[str, Any]], None]] = []
+
+    def __call__(self, name: str, data: dict[str, Any]) -> None:
+        now = time.perf_counter()
+        if name == "barge_in" and self.player is not None:
+            data = {**data, "player_active_after_stop": bool(self.player.is_active)}
+        self.events.append((now, name, data))
+        if self.verbose and name not in ("state",):
+            print(f"{now - self.t0:7.3f} {name:18} {json.dumps(data, default=str)[:160]}")
+        for h in self.hooks:
+            h(name, data)
+
+    def first(self, name: str) -> tuple[float, dict[str, Any]] | None:
+        for t, n, d in self.events:
+            if n == name:
+                return t, d
+        return None
+
+    def all(self, name: str) -> list[tuple[float, dict[str, Any]]]:
+        return [(t, d) for t, n, d in self.events if n == name]
+
+
+class Check:
+    def __init__(self) -> None:
+        self.failures: list[str] = []
+        self.notes: list[str] = []
+
+    def ok(self, cond: bool, msg: str) -> None:
+        if not cond:
+            self.failures.append(msg)
+
+    def note(self, msg: str) -> None:
+        self.notes.append(msg)
+
+
+def mock_agent(
+    *,
+    stt: MockSTT | MockStreamingSTT,
+    llm: MockLLM,
+    tts: MockTTS,
+    player: MockPlayer,
+    segmenter: ScriptedSegmenter | None,
+    frames: AsyncIterator[np.ndarray] | None,
+    settings: PipelineSettings,
+    log: EventLog,
+    tools: list[Tool] | None = None,
+    fillers: list[str] | None = None,
+    max_turns: int | None = None,
+    pending_events: asyncio.Queue | None = None,
+) -> Any:
+    from .pipeline import VoiceAgent
+
+    return VoiceAgent(
+        stt,
+        llm,
+        tts,
+        "You are Eva, a warm voice companion.",
+        tools or [],
+        settings,
+        frames=frames,
+        segmenter=segmenter,
+        player=player,
+        fillers=fillers,
+        on_event=log,
+        max_turns=max_turns,
+        chunker_factory=lambda: StandInChunker(settings.first_chunk_min_chars, 6),
+        sanitizer=standin_clean_for_tts,
+        tool_executor=standin_execute,
+        pending_events=pending_events if pending_events is not None else asyncio.Queue(),
+    )
+
+
+def settings_with(**over: Any) -> PipelineSettings:
+    return dataclasses.replace(PipelineSettings(), **over)
+
+
+def turn_rows(turns: list[TurnMetrics]) -> list[dict[str, Any]]:
+    rows = []
+    for m in turns:
+        rows.append(
+            {
+                "user_text": m.user_text,
+                "assistant_text": m.assistant_text,
+                "interrupted": m.interrupted,
+                "response_latency": None if m.response_latency() is None else round(m.response_latency(), 3),
+                **{k: v for k, v in m.breakdown().items()},
+                "audio_seconds": None
+                if m.audio_started is None or m.audio_finished is None
+                else round(m.audio_finished - m.audio_started, 3),
+            }
+        )
+    return rows

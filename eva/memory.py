@@ -42,8 +42,23 @@ EXTRACT_SYSTEM_PROMPT = (
 )
 
 
+# Function words that do not distinguish two facts ("a meal" / "meals", "the user's ...").
+_STOPWORDS = frozenset(
+    {"a", "an", "the", "and", "or", "of", "to", "is", "are", "in", "on", "for", "with", "their",
+     "they", "them", "user", "user's", "users", "his", "her", "he", "she", "has", "have", "that"}
+)
+
+
 def _normalise(fact: str) -> str:
-    return " ".join(_WORD_RE.findall(fact.lower()))
+    """Lowercase content words, plurals folded ("meals" -> "meal"), function words dropped."""
+    words = []
+    for w in _WORD_RE.findall(fact.lower()):
+        if w in _STOPWORDS:
+            continue
+        if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        words.append(w)
+    return " ".join(words)
 
 
 def _similar(a: str, b: str, threshold: float = 0.8) -> bool:
@@ -124,36 +139,74 @@ class Memory:
         """Facts as short lines for the ``{memory}`` slot ("" when empty)."""
         return "\n".join(f"- {f}" for f in self.facts)
 
+    def drop_name_facts(self, user_name: str) -> list[str]:
+        """Forget facts that state the user's name or file ``user_name`` as another person.
+
+        When the caller knows the name (``--user-name``) such facts can only be wrong:
+        the transcript is speech recognition, so "my name is Doston" arrives as
+        "Doster", and the assistant addressing the user by name once produced "Has a
+        friend named Doston."  Returns the facts that were removed.
+        """
+        user_name = " ".join((user_name or "").split())
+        if not user_name:
+            return []
+        pat = re.compile(r"\bname is\b|\b(?:named|called|name)\s+" + re.escape(user_name) + r"\b", re.IGNORECASE)
+        dropped = [f for f in self.facts if pat.search(f)]
+        if dropped:
+            self.facts = [f for f in self.facts if f not in dropped]
+        return dropped
+
     # ---------------------------------------------------------- summarising
     async def update_from_transcript(
         self,
         llm: Any,
         messages: list[dict[str, Any]],
         *,
+        user_name: str = "",
+        assistant_name: str = "Eva",
         save: bool = True,
     ) -> list[str]:
         """Ask ``llm`` for new durable facts in ``messages`` and merge them.
 
         ``messages`` is the OpenAI-format history of the session (system / tool
-        messages are ignored).  Returns the list of facts that were actually new.
-        Never raises on model nonsense: unparsable output just yields no facts.
+        messages are ignored).  ``user_name`` is who the assistant was talking to when
+        the caller knows it (``--user-name``): the extractor is told, so it neither
+        records a misheard name nor files that name as a friend.  Returns the list of
+        facts that were actually new.  Never raises on model nonsense: unparsable
+        output just yields no facts.
         """
         transcript = _transcript_text(messages)
         if not transcript.strip():
             return []
         known = "\n".join(f"- {f}" for f in self.facts) or "(none yet)"
+        user_name = " ".join((user_name or "").split())
+        if user_name:
+            who = (
+                f"The person is {user_name} and the assistant is {assistant_name}; both names are "
+                f"already known. Never record the person's name or a spelling of it, and never treat "
+                f'"{user_name}" or "{assistant_name}" in the transcript as somebody else '
+                "(the assistant addresses the person by name). "
+            )
+        else:
+            who = f"The assistant is {assistant_name}; never record facts about the assistant. "
         prompt = [
             {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": (
-                    f"Known facts:\n{known}\n\nConversation transcript:\n{transcript}\n\n"
-                    "JSON array of NEW durable facts about the user:"
+                    f"{who}The transcript comes from speech recognition, so names and rare words "
+                    f"may be misspelt.\n\nKnown facts:\n{known}\n\nConversation transcript:\n"
+                    f"{transcript}\n\nJSON array of NEW durable facts about the person:"
                 ),
             },
         ]
         raw = await _complete(llm, prompt)
-        new = self.merge(parse_fact_array(raw))
+        facts = parse_fact_array(raw)
+        if user_name:
+            probe = Memory(path=self.path, facts=list(facts))
+            for bad in probe.drop_name_facts(user_name):
+                facts.remove(bad)
+        new = self.merge(facts)
         if new and save:
             self.save()
         return new

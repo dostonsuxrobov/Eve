@@ -108,32 +108,59 @@ def detect_lang(text: str, default: str = "en") -> str:
 _ALPHA_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 
-# Phrases Whisper-family models produce for silence, breaths and fan noise.
-WHISPER_PHANTOMS: frozenset[str] = frozenset(
+# Subtitle-corpus junk that no STT should ever turn into a reply.
+SUBTITLE_PHANTOMS: frozenset[str] = frozenset(
     {
-        "you", "thank you", "thanks", "thank you for watching", "thanks for watching", "bye",
-        "goodbye", "okay", "ok", "so", "the", "um", "uh", "hmm", "mm", "oh", "yeah", "yes", "no",
-        "subtitles by the amazing team", "please subscribe", "like and subscribe", "the end",
-        "i'm sorry", "sorry", "продолжение следует", "субтитры", "спасибо", "спасибо за просмотр",
-        "да", "нет", "так", "ну", "хм",
+        "thank you for watching", "thanks for watching", "subtitles by the amazing team",
+        "please subscribe", "like and subscribe", "the end", "продолжение следует", "субтитры",
+        "спасибо за просмотр",
     }
+)
+# What Whisper-family models invent for silence, breaths and fan noise. Only applied to
+# a Whisper-class transcript: on Scribe / Parakeet these are real short answers
+# ("yeah", "no", "okay", "bye") and dropping them looked like Eva ignoring the user.
+WHISPER_PHANTOMS: frozenset[str] = SUBTITLE_PHANTOMS | frozenset(
+    {
+        "you", "thank you", "thanks", "bye", "goodbye", "okay", "ok", "so", "the", "um", "uh",
+        "hmm", "mm", "oh", "yeah", "yes", "no", "i'm sorry", "sorry", "спасибо", "да", "нет",
+        "так", "ну", "хм",
+    }
+)
+# A bare hesitation: the user is thinking, not done. Waited on, never answered.
+HESITATIONS: frozenset[str] = frozenset(
+    {"um", "uh", "uhm", "hmm", "hm", "mm", "mhm", "er", "erm", "эм", "ээ", "мм", "хм", "ну", "э"}
 )
 
 
-def looks_hallucinated(text: str, meta: dict[str, Any] | None = None) -> str | None:
+def is_hesitation(text: str) -> bool:
+    """True if ``text`` is nothing but hesitation sounds ("Uh.", "Hmm, uh")."""
+    bare = _WS_RE.sub(" ", _PUNCT_RE.sub("", text).strip().lower())
+    words = bare.split()
+    return bool(words) and all(w in HESITATIONS for w in words)
+
+
+def looks_hallucinated(text: str, meta: dict[str, Any] | None = None, *, whisper_class: bool | None = None) -> str | None:
     """Return a reason string if ``text`` should be dropped as a phantom transcript, else ``None``.
 
-    Rules, cheapest first: no letters at all; a known phantom phrase on its own;
-    Whisper segment scores that all say "no speech" or "very low confidence".
+    Rules, cheapest first: no letters at all; subtitle junk on its own; for a
+    Whisper-class transcript (``whisper_class``, else inferred from the presence of
+    ``segment_scores`` in ``meta``) also the silence phantoms and segment scores that
+    all say "no speech" or "very low confidence".
     """
     stripped = text.strip()
     if not _ALPHA_RE.search(stripped):
         return "no letters"
     bare = _PUNCT_RE.sub("", stripped).strip().lower()
     bare = _WS_RE.sub(" ", bare)
-    if bare in WHISPER_PHANTOMS:
+    if bare in SUBTITLE_PHANTOMS:
         return f"phantom phrase {bare!r}"
     scores = (meta or {}).get("segment_scores") or []
+    if whisper_class is None:
+        whisper_class = bool(scores)
+    if not whisper_class:
+        return None
+    if bare in WHISPER_PHANTOMS:
+        return f"phantom phrase {bare!r}"
     if scores:
         nsp = [float(s.get("no_speech_prob", 0.0)) for s in scores]
         lp = [float(s.get("avg_logprob", 0.0)) for s in scores]
@@ -167,13 +194,16 @@ CONTINUATION_WORDS: frozenset[str] = frozenset(
 def looks_incomplete(text: str) -> bool:
     """Heuristic: does this transcript look like the user was cut off mid-thought?
 
-    Unfinished if it trails off with a comma/dash, ends on a continuation word
-    ("and", "because", "и", "потому что"), or is three or more words with no final
-    punctuation. Short punctuation-less replies ("yeah", "not really") count as done.
+    Unfinished if it is nothing but hesitation sounds ("Uh.", "Hmm"), trails off with a
+    comma/dash, ends on a continuation word ("and", "because", "и", "потому что"), or
+    is three or more words with no final punctuation. Short punctuation-less replies
+    ("yeah", "not really") count as done.
     """
     t = text.strip()
     if not t:
         return False
+    if is_hesitation(t):
+        return True
     if _TERMINAL_RE.search(t):
         return False
     if _TRAILING_OPEN_RE.search(t):
@@ -186,10 +216,46 @@ def looks_incomplete(text: str) -> bool:
     return len(words) >= 3
 
 
+# ------------------------------------------------------------- self echo
+_WORDS_RE = re.compile(r"[\w']+", re.UNICODE)
+
+
+def looks_like_echo(text: str, spoken: str, *, min_words: int = 3, max_words: int = 12, min_overlap: float = 0.8) -> bool:
+    """True if a short transcript is (a piece of) what the agent itself just said.
+
+    Through speakers the microphone hears the reply, and a mic's echo canceller takes
+    the first seconds of a session to converge, so early on the STT can return
+    Eva's own greeting ("What's on your mind today?") or a fragment of it. A
+    transcript of ``min_words``..``max_words`` words that is, for at least
+    ``min_overlap`` of its length, a contiguous run of ``spoken`` is echo, not a turn.
+    One- and two-word transcripts are never judged: "not much" after "not much, you?"
+    is an answer.
+    """
+    words = _WORDS_RE.findall(text.lower())
+    if len(words) < min_words or len(words) > max_words:
+        return False
+    said = _WORDS_RE.findall(spoken.lower())
+    if len(said) < min_words:
+        return False
+    # longest contiguous run of consecutive transcript words found consecutively in spoken
+    best = 0
+    for i in range(len(words)):
+        for j in range(len(said)):
+            k = 0
+            while i + k < len(words) and j + k < len(said) and words[i + k] == said[j + k]:
+                k += 1
+            best = max(best, k)
+    return best / len(words) >= min_overlap
+
+
 __all__ = [
     "CUE_SETTINGS",
     "CONTINUATION_WORDS",
+    "HESITATIONS",
+    "SUBTITLE_PHANTOMS",
+    "is_hesitation",
     "looks_incomplete",
+    "looks_like_echo",
     "NONVERBAL_TAGS",
     "V3_TAG_WHITELIST",
     "WHISPER_PHANTOMS",
