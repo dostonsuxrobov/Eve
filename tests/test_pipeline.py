@@ -15,6 +15,7 @@ import asyncio
 import time
 from typing import Any
 
+import numpy as np
 import pytest
 
 from eva.interfaces import MIC_SAMPLE_RATE, Tool
@@ -908,6 +909,38 @@ async def scenario_storm_needs_final_text(verbose: bool) -> tuple[Check, dict[st
     return c, {"turns": _turn_rows(turns)}
 
 
+async def scenario_continuous_audio_inside_a_chunk(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(y) the writer releases audio piece by piece (each ~80 ms). Inside one chunk the pieces must
+    join without any fade: a fade applied at every release was a 12 Hz tremolo ("a bad connection")."""
+    c = Check()
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    stt = MockSTT(["Tell me a long one."], delay_s=0.2)
+    text = "Well, here is a long steady sentence that keeps going for a while so the tone runs on and on without a break."
+    llm = MockLLM([text], ttft_s=0.2)
+    tts = MockTTS(ttfa_s=0.1, realtime_factor=0.3)  # a constant-amplitude tone with 50 ms fades only at the clip's own ends
+    seg = ScriptedSegmenter(script=[(0.3, 1.0)])
+    settings = _settings(filler_after_ms=0, first_chunk_min_chars=200, min_chunk_chars=200)  # one chunk
+    agent = _mock_agent(
+        stt=stt, llm=llm, tts=tts, player=player, segmenter=seg, frames=silent_frames(12), settings=settings,
+        log=log, max_turns=1,
+    )
+    turns = await agent.run()
+    c.ok(len(turns) == 1, f"expected 1 turn, got {len(turns)}")
+    audio = np.frombuffer(b"".join(player.pcm), dtype=np.int16).astype(np.float32)
+    sr = 24_000
+    lead, tail = int(sr * (settings.lead_in_ms + settings.fade_in_ms + 80) / 1000), int(sr * (settings.tail_ms + settings.fade_out_ms + 80) / 1000)
+    body = audio[lead : audio.size - tail]
+    hop = sr // 50  # 20 ms
+    rms = np.sqrt((body[: body.size // hop * hop].reshape(-1, hop) ** 2).mean(axis=1))
+    ref = float(np.median(rms))
+    dips = int((rms < 0.5 * ref).sum())
+    c.ok(ref > 100, f"tone too quiet to judge ({ref:.0f})")
+    c.ok(dips == 0, f"{dips} of {rms.size} 20 ms hops inside the chunk dipped below half the median level (tremolo)")
+    c.note(f"{rms.size} hops, median {ref:.0f}, min {rms.min():.0f}")
+    return c, {"turns": _turn_rows(turns)}
+
+
 SCENARIOS = [
     ("a_normal_two_turns", scenario_normal_two_turns),
     ("b_barge_in", scenario_barge_in),
@@ -933,6 +966,7 @@ SCENARIOS = [
     ("v_real_words_interrupt", scenario_real_words_interrupt),
     ("w_late_check_on_final_text", scenario_late_check_on_final_text),
     ("x_storm_needs_final_text", scenario_storm_needs_final_text),
+    ("y_continuous_audio_inside_a_chunk", scenario_continuous_audio_inside_a_chunk),
 ]
 
 

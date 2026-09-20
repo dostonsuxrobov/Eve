@@ -1357,12 +1357,18 @@ class VoiceAgent:
                 while self.player.buffered_seconds > PLAYER_LOOKAHEAD_S:
                     await asyncio.sleep(0.02)
                 if held and held_job is not None:
-                    # a chunk boundary: soften both hot edges (v3 clips start and end at -30..-40 dBFS)
-                    gap = room_tone(gap_ms, sr, tone) if (first_of_job and gap_ms and not job.is_hint) else b""
-                    self._write_real(turn, held_job, fade_out(held, edge_ms, sr) + gap)
-                    held, held_job = b"", None
-                    if first_of_job:
+                    if held_job is not job:
+                        # a chunk boundary: soften both hot edges (v3 clips start and end at
+                        # -30..-40 dBFS) and leave the pause a sentence break has
+                        gap = room_tone(gap_ms, sr, tone) if (gap_ms and not job.is_hint) else b""
+                        self._write_real(turn, held_job, fade_out(held, edge_ms, sr) + gap)
                         b = fade_in(b, edge_ms, sr)
+                    else:
+                        # the same chunk continuing: the held tail is just the previous piece's
+                        # last fade_out_ms, written back untouched. (Fading it here too, on every
+                        # ~80 ms piece, was the 12 Hz tremolo heard as "a bad connection".)
+                        self._write_real(turn, held_job, held)
+                    held, held_job = b"", None
                 if first_write:
                     first_write = False
                     lead = b"" if turn.filler_samples else room_tone(getattr(s, "lead_in_ms", 0), sr, tone)

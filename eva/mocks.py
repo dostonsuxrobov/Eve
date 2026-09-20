@@ -295,6 +295,7 @@ class MockPlayer:
         self._dropped = 0
         self.started = False
         self.writes: list[tuple[float, float, int]] = []
+        self.pcm: list[bytes] = []  # the bytes themselves, for tests that look at the audio
         self.stop_calls: list[tuple[float, int]] = []
 
     def start(self) -> None:
@@ -316,6 +317,7 @@ class MockPlayer:
         self._end_t = start + n / self.sample_rate
         self._written += n
         self.writes.append((now, start, n))
+        self.pcm.append(bytes(pcm))
 
     def mark(self) -> None:
         self._mark_written = self._written

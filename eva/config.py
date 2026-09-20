@@ -101,7 +101,7 @@ class PipelineSettings:
     fade_in_ms: int = 120
     fade_out_ms: int = 280
     tail_ms: int = 450  # room tone after the last word before she is "listening" again
-    sentence_gap_ms: int = 0  # extra room tone between sentence chunks (pace is tuned; leave 0)
+    sentence_gap_ms: int = 220  # pause between sentence chunks: v3 clips are trimmed hot, so without one sentences butt together
     chunk_edge_ms: int = 40  # short fades at every chunk boundary: each v3 clip has hot edges
     # Optional faint noise bed in the gaps and while idle (None = digital silence). Tried at
     # -62 dBFS on 2026-09-20: audible hiss on an iPhone speaker, and unnecessary once every

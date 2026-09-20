@@ -94,6 +94,21 @@ tone at -62 dBFS in the lead-in, the tail and idle time. Cost: first audio 0.5-0
 0.2 (`--once` after the change: TTFA 0.67 s, 1.38 s to first audio in text mode). A reply
 measured after the change: lead-in at -62 dBFS, quietest 10 % of hops at -64, tail at -62.
 
+## The "bad connection" (2026-09-20)
+
+Heard on the phone and then on the laptop: her voice choppy "like a person with a bad
+connection". Ruled out in order, each with a measurement: the laptop's internet (68 Mbit/s,
+31-46 ms to the APIs), v3 delivery (2.7x real time after the first burst, no mid-stream stall),
+the phone's Wi-Fi (rtt 7-15 ms in session, 0 buffer drops), iOS voice processing (same with
+echo cancelling off), local player starvation (18 s and 9 s replies, zero gaps), and v3's own
+rendering (7-10 natural intra-speech dips per 12 s clip, same as Flash and Turbo). Two real
+causes, both mine, both from the tone commit the day before: the phone page resampled each
+network message on its own (a click ~12x/s at the boundaries), and the writer applied the new
+40 ms "chunk edge" fade at every ~80 ms piece release instead of only at chunk boundaries: a
+12 Hz tremolo on 20 % of her speech (the regression test on the old writer: 67 of 335 hops
+inside one chunk dipped below half level; fixed: 0). Lesson recorded in the test suite:
+`y_continuous_audio_inside_a_chunk` and `test_web_page_scripts_parse`.
+
 ## The `maya` stack after the 2026-09-19 fixes
 
 Two-utterance simulator run (`samples/user_hello.wav`, `samples/user_ru_rough_day.wav`,
