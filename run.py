@@ -5,6 +5,7 @@
     .venv/Scripts/python.exe run.py --lang ru                     # locked to Russian
     .venv/Scripts/python.exe run.py --preset local                # everything on this laptop
     .venv/Scripts/python.exe run.py --preset local                # everything on this laptop
+    .venv/Scripts/python.exe run.py --web --tls                   # talk from your phone: https://<laptop-ip>:8443
     .venv/Scripts/python.exe run.py --list-devices
     .venv/Scripts/python.exe run.py --text          # type instead of talk (Eva still speaks)
     .venv/Scripts/python.exe run.py --once "hey eva, how's it going"   # one typed turn, then exit
@@ -56,6 +57,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--mute-fillers", action="store_true", help="no 'hmm' while thinking")
     ap.add_argument("--no-greeting", action="store_true", help="don't have her say hello when the session starts")
     ap.add_argument("--lang", default="auto", choices=lang_modes(), help="auto: follow you, switching per sentence; en / ru: lock the session to one language")
+    ap.add_argument("--web", action="store_true", help="serve the phone/browser client instead of using this machine's mic and speakers")
+    ap.add_argument("--port", type=int, help="port for --web (default 8080, or 8443 with --tls)")
+    ap.add_argument("--tls", action="store_true", help="--web over https with a self-signed certificate (browsers need it for the mic)")
     ap.add_argument("--debug", action="store_true", help="verbose logging + every pipeline event")
     return ap.parse_args(argv)
 
@@ -94,6 +98,16 @@ class StatusPrinter:
                 "[yellow]the speakers keep reaching the mic: for the next "
                 f"{data['hold_s']:.0f} s only a full transcript can interrupt me. Headphones, or lower the volume.[/]"
             )
+        elif name == "web_ready":
+            console.print(f"[bold green]open on your phone:[/] [bold]{data['url']}[/]   [dim](this machine: {data['local']})[/]")
+            if data.get("tls"):
+                console.print("[dim]self-signed certificate: accept the browser warning once (Safari: Show details -> visit this website);"
+                              " Chrome on Android: install " + data["url"] + "/cert.pem or use chrome://flags/#unsafely-treat-insecure-origin-as-secure[/]")
+            console.print("[dim]Ctrl-C stops the server[/]")
+        elif name == "web_client":
+            console.print(f"[dim]phone {data['state']}: {escape(str(data['peer']))}[/]")
+        elif name == "memory_saved":
+            console.print(f"[dim]memory saved ({data['facts']} facts)[/]")
         elif name == "stt_incomplete":
             console.print(f"[dim]  (sounds unfinished, giving you {data['grace_ms']} ms)[/]")
         elif name == "utterance_carried":
@@ -207,6 +221,22 @@ async def amain(args: argparse.Namespace) -> int:
     if plan.locked and session.persona.lang != plan.mode:
         console.print(f"[dim]no {plan.mode} version of persona {session.persona.name!r}; using the English prompt with a locked-language rule[/]")
     console.print(f"[dim]language: {plan.mode} | persona: {session.persona.name} ({session.persona.lang}) | brain: {llm.name}[/]")
+    if args.web:
+        from eva.web.server import serve_web
+
+        port = args.port or (8443 if args.tls else 8080)
+        try:
+            await serve_web(
+                session, settings, port=port, tls=args.tls, user_name=args.user_name or "",
+                greeting=not args.no_greeting, printer=printer,
+            )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            console.print("\n[dim]stopping the server...[/]")
+            await asyncio.gather(stt.close(), llm.close(), tts.close(), return_exceptions=True)
+            console.print("[dim]bye.[/]")
+        return 0
     if not args.text:
         console.print(
             f"[dim]barge-in: {settings.barge_in_confirm} (while I talk, your words must show up in the transcript"

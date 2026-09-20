@@ -461,7 +461,9 @@ class VoiceAgent:
         self._echo_times: deque[float] = deque()
         self._storm_until = 0.0
         self._echo: EchoDetector | None = (
-            EchoDetector(player, MIC_SAMPLE_RATE) if settings.echo_detector and callable(getattr(player, "played_since", None)) else None
+            EchoDetector(player, MIC_SAMPLE_RATE, max_lag_s=float(getattr(player, "echo_max_lag_s", 0.35)))
+            if settings.echo_detector and callable(getattr(player, "played_since", None))
+            else None
         )
         # Whisper-class STTs invent phrases on silence; Scribe / Parakeet do not (see eva.delivery)
         self._whisper_class = "whisper" in str(getattr(stt, "name", "")).lower()

@@ -18,6 +18,7 @@ Windows 11 laptop (RTX 4050 6 GB, Python 3.13). Not built for scale.
 .venv\Scripts\python.exe run.py --user-name Doston             # preset maya, auto language
 .venv\Scripts\python.exe run.py --preset local                 # everything on this laptop, offline
 .venv\Scripts\python.exe run.py --user-name Doston --lang ru   # locked to Russian
+.venv\Scripts\python.exe run.py --web --tls --user-name Doston  # talk from your phone (see below)
 .venv\Scripts\python.exe run.py --text                         # type instead of talk (she still speaks)
 .venv\Scripts\python.exe run.py --once "hey, how's it going"   # one typed turn, then exit
 .venv\Scripts\python.exe run.py --list-devices
@@ -48,6 +49,36 @@ character) costs more per hour than that. Every other brain measured, cloud and 
 gives no first result in time, that turn is served locally, the cloud provider is marked down for
 20 s and probed again after (`eva/failover.py`; the console says so). The backups are warmed in
 the background after the cloud providers, so startup is not delayed.
+
+## From your phone
+
+```
+.venv\Scripts\python.exe run.py --web --tls --user-name Doston
+```
+
+prints `open on your phone: https://192.168.0.154:8443` (your laptop's Wi-Fi address). The page
+(`eva/web/static/index.html`) captures the phone's mic, streams it to the laptop over a
+WebSocket, and plays her voice back; the brain, Scribe and ElevenLabs all still run on the
+laptop, so it is the same Eva. Tap **Start** (the browser asks for the mic), talk; **Stop her**
+interrupts by touch, **End** hangs up; she also hangs up when you say goodbye. The phone's own
+echo canceller keeps her voice out of the mic, and the same words-not-echo barge-in rule applies.
+
+Browsers allow the microphone only on `https://`, so `--tls` makes a self-signed certificate
+for your laptop's address (once, with the openssl that ships with Git for Windows, under
+`models/web/`). Accepting it:
+
+* **iPhone / Safari**: open the URL, "Show Details" -> "visit this website", then Start.
+* **Android / Chrome**: either download `https://<laptop-ip>:8443/cert.pem` and install it
+  (Settings -> Security -> Encryption & credentials -> Install a certificate -> CA certificate),
+  or open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, add
+  `http://<laptop-ip>:8080`, and run without `--tls` on port 8080.
+* **Anywhere, no certificate fuss** (also over LTE): a tunnel with a real certificate, e.g.
+  `winget install Cloudflare.cloudflared` then `cloudflared tunnel --url http://localhost:8080`
+  while `run.py --web` runs; open the `https://...trycloudflare.com` URL it prints. Adds the
+  round trip to Cloudflare's edge (tens of milliseconds).
+
+Both phone and laptop must be on the same Wi-Fi for the direct URL; Windows may ask once to
+allow Python through the firewall on a private network. One phone at a time.
 
 ## Languages
 
@@ -133,7 +164,8 @@ eva/
   delivery.py      delivery cues, language detection, phantom / hesitation / echo gates
   memory.py        facts store + end-of-session summariser
   tools.py         time, timer, notes, weather, open url, end_conversation
-  audio/           mic, vad, player, envelope, leveler
+  audio/           mic, vad, player, envelope, leveler, echo
+  web/             the phone client: server.py (page + socket), transport.py (WebMic, WebPlayer), static/index.html
   stt/ llm/ tts/   providers behind interfaces.py
   assets/          lang/*.toml, personas/<lang>/*.md
   mocks.py         doubles and the test harness helpers

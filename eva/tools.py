@@ -259,8 +259,19 @@ def open_url(url: str) -> str:
 
 
 # ----------------------------------------------------------------- registry
+_NOT_A_GOODBYE_RE = re.compile(r"error|system|silence|timeout|fail|no response|nothing", re.IGNORECASE)
+
+
 def end_conversation(reason: str = "") -> str:
-    """Ask the pipeline to end the session after the current reply (the goodbye)."""
+    """Ask the pipeline to end the session after the current reply (the goodbye).
+
+    Refused when the stated reason is not the user leaving: the brain once called this on
+    the first turn of a session with reason "System error" (2026-09-19). The session only
+    ends because the user said goodbye.
+    """
+    if _NOT_A_GOODBYE_RE.search(reason or ""):
+        log.warning("end_conversation refused: reason %r is not the user leaving", reason)
+        return "Not ending: the conversation only ends when the user themselves says goodbye. Keep talking normally."
     pending_events.put_nowait({"type": "end_session", "reason": reason})
     # Only reached by the model when it called the tool without saying goodbye: the
     # pipeline skips the round after a final tool whose call already carried the goodbye.
@@ -271,8 +282,9 @@ _TOOLS: list[Tool] = [
     Tool(
         name="end_conversation",
         description=(
-            "End the conversation. Call this when the user says goodbye, says they have to go, "
-            "or asks you to stop; say your goodbye in the same reply."
+            "End the conversation. Call this ONLY when the user themselves says goodbye, says they "
+            "have to go, or asks you to stop; say your goodbye in the same reply. Never call it "
+            "because of a silence, an error, a system message or anything you decided on your own."
         ),
         parameters={
             "type": "object",
