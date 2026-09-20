@@ -67,21 +67,39 @@
     registerProcessor("cap", Cap);`;
   const playWorklet = `
     class Play extends AudioWorkletProcessor {
-      constructor() { super(); this.q = []; this.off = 0; this.played = 0; this.gen = 0; this.tone = 0; this.lp = 0;
+      // A jitter buffer: hold `pre` seconds before a reply starts, and after the queue runs dry
+      // mid-reply hold `re` seconds before resuming, so a Wi-Fi hiccup is one short pause instead
+      // of a stutter. "eot" (end of the reply) or 400 ms without new data drains whatever is held.
+      constructor() { super(); this.q = []; this.off = 0; this.queued = 0; this.played = 0; this.tone = 0; this.lp = 0;
+        this.pre = 0.25 * sampleRate; this.re = 0.15 * sampleRate; this.need = this.pre; this.playing = false;
+        this.drain = false; this.lastData = 0; this.underruns = 0;
         this.port.onmessage = (e) => { const m = e.data;
-          if (m.flush) { this.q = []; this.off = 0; this.port.postMessage({ stopped: true, played: this.played }); this.played = 0; this.gen++; }
-          else if (m.mark) { this.played = 0; }
+          if (m.flush) { this.q = []; this.off = 0; this.queued = 0; this.playing = false; this.need = this.pre; this.drain = false;
+                         this.port.postMessage({ stopped: true, played: this.played }); this.played = 0; }
+          else if (m.eot) { this.drain = true; }
+          else if (m.prebuffer !== undefined) { this.pre = m.prebuffer * sampleRate; this.need = this.pre; }
           else if (m.roomTone !== undefined) { this.tone = m.roomTone === null ? 0 : Math.pow(10, m.roomTone / 20) * 3.8; /* uniform noise through the 0.35 one-pole has rms 0.266 */ }
-          else if (m.pcm) { this.q.push(new Float32Array(m.pcm)); } };
+          else if (m.pcm) { const a = new Float32Array(m.pcm); this.q.push(a); this.queued += a.length; this.lastData = currentTime; this.drain = false; } };
       }
       process(inputs, outputs) {
         const out = outputs[0][0]; let i = 0;
-        while (i < out.length && this.q.length) {
-          const head = this.q[0]; const take = Math.min(out.length - i, head.length - this.off);
-          out.set(head.subarray(this.off, this.off + take), i); i += take; this.off += take; this.played += take;
-          if (this.off >= head.length) { this.q.shift(); this.off = 0; }
+        if (!this.playing && this.queued > 0) {
+          const stale = currentTime - this.lastData > 0.4;
+          if (this.queued >= this.need || this.drain || stale) this.playing = true;
         }
-        // idle: faint low-passed room tone (same level the server uses in the gaps), not digital zero
+        if (this.playing) {
+          while (i < out.length && this.q.length) {
+            const head = this.q[0]; const take = Math.min(out.length - i, head.length - this.off);
+            out.set(head.subarray(this.off, this.off + take), i); i += take; this.off += take; this.played += take; this.queued -= take;
+            if (this.off >= head.length) { this.q.shift(); this.off = 0; }
+          }
+          if (i < out.length) {  // ran dry
+            if (this.drain) { this.playing = false; this.need = this.pre; this.drain = false; }        // the reply is over
+            else { this.playing = false; this.need = this.re; this.underruns++;                     // a hiccup: rebuffer briefly
+                   if (this.underruns % 3 === 0 && this.pre < 0.6 * sampleRate) this.pre *= 1.5;   // and grow the prebuffer if it keeps happening
+                   this.port.postMessage({ underrun: this.underruns }); }
+          }
+        }
         for (; i < out.length; i++) { this.lp += 0.35 * ((Math.random() * 2 - 1) - this.lp); out[i] = this.lp * this.tone; }
         return true;
       }
@@ -112,7 +130,10 @@
     await ctx.audioWorklet.addModule(blobUrl(playWorklet));
     playNode = new AudioWorkletNode(ctx, "play", { numberOfInputs: 0, outputChannelCount: [1] });
     playNode.connect(ctx.destination);
-    playNode.port.onmessage = (e) => { if (e.data.stopped && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "stopped", played: e.data.played })); };
+    playNode.port.onmessage = (e) => {
+      if (e.data.stopped && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "stopped", played: e.data.played }));
+      if (e.data.underrun) setStatus("network hiccup (" + e.data.underrun + ")");
+    };
     const src = ctx.createMediaStreamSource(stream);
     micNode = new AudioWorkletNode(ctx, "cap", { numberOfInputs: 1, numberOfOutputs: 0 });
     src.connect(micNode);
@@ -135,7 +156,8 @@
   }
 
   function onEvent(m) {
-    if (m.type === "config") { outRate = m.sampleRate; if (playNode) playNode.port.postMessage({ roomTone: m.roomToneDbfs === undefined ? null : m.roomToneDbfs }); return; }
+    if (m.type === "config") { outRate = m.sampleRate; if (playNode) { playNode.port.postMessage({ roomTone: m.roomToneDbfs === undefined ? null : m.roomToneDbfs }); if (m.prebufferS) playNode.port.postMessage({ prebuffer: m.prebufferS }); } return; }
+    if (m.type === "eot") { if (playNode) playNode.port.postMessage({ eot: true }); return; }
     if (m.type === "stop") { playNode.port.postMessage({ flush: true }); return; }
     if (m.type === "busy") { line("warn", "another client is connected; try again in a moment"); return; }
     if (m.type !== "event") return;

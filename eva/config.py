@@ -103,10 +103,10 @@ class PipelineSettings:
     tail_ms: int = 450  # room tone after the last word before she is "listening" again
     sentence_gap_ms: int = 0  # extra room tone between sentence chunks (pace is tuned; leave 0)
     chunk_edge_ms: int = 40  # short fades at every chunk boundary: each v3 clip has hot edges
-    # A faint constant noise bed at v3's own in-speech floor (median -65 dBFS measured), played
-    # in every gap and while idle, so the background never switches on with her first word and
-    # off after her last. None = digital silence.
-    room_tone_dbfs: float | None = -62.0
+    # Optional faint noise bed in the gaps and while idle (None = digital silence). Tried at
+    # -62 dBFS on 2026-09-20: audible hiss on an iPhone speaker, and unnecessary once every
+    # sentence is v3 (in-speech floor -65..-84 dBFS) with 120/280 ms fades. Off.
+    room_tone_dbfs: float | None = None
     tts_parallelism: int = 2  # sentences synthesized ahead of playback
     input_device: int | None = None
     output_device: int | None = None

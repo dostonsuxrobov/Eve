@@ -1176,6 +1176,9 @@ class VoiceAgent:
             self._enqueue(turn, jobs, round_no, final_text)
         jobs.put_nowait(None)
         await writer
+        end_turn = getattr(self.player, "end_turn", None)
+        if callable(end_turn):
+            end_turn()  # a remote player may hold a jitter buffer: nothing more is coming, drain it
         await self.player.wait_until_done()
         turn.metrics.audio_finished = _now()
         if final_text:

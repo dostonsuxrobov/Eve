@@ -24,9 +24,10 @@ client -> server
     frames at that rate; text ``{"type": "stopped", "played": N}`` after a flush;
     text ``{"type": "interrupt"}`` (a tap on the stop button); ``{"type": "bye"}``.
 server -> client
-    text ``{"type": "config", "sampleRate": 24000}``; binary int16 PCM 24 kHz;
-    text ``{"type": "stop"}`` flush now; ``{"type": "event", "name": ..., "data": ...}``
-    every pipeline event the UI shows.
+    text ``{"type": "config", "sampleRate": 24000, "prebufferS": 0.25, "roomToneDbfs": null}``;
+    binary int16 PCM 24 kHz; text ``{"type": "stop"}`` flush now; ``{"type": "eot"}`` the
+    reply's audio is complete (drain the jitter buffer); ``{"type": "event", "name": ...,
+    "data": ...}`` every pipeline event the UI shows.
 """
 from __future__ import annotations
 
@@ -46,7 +47,8 @@ log = logging.getLogger("eva.web")
 
 Send = Callable[[str | bytes], Awaitable[None]]
 FRAME_MS = 20
-TRANSPORT_LATENCY_S = 0.20  # assumed socket + jitter buffer + output latency for the played estimate
+TRANSPORT_LATENCY_S = 0.20  # assumed socket + output latency for the played estimate
+PREBUFFER_S = 0.25  # the page holds this much before it starts a reply (Wi-Fi jitter); added to the estimate
 
 
 class WebMic:
@@ -119,7 +121,8 @@ class WebPlayer:
         self.played_history_s = 3.0
         self.echo_max_lag_s = 0.8  # network + jitter buffer: wider than the local player's window
         self.reported_played: int | None = None  # the browser's own count after the last stop
-        self.latency_s = TRANSPORT_LATENCY_S
+        self.latency_s = TRANSPORT_LATENCY_S + PREBUFFER_S
+        self.prebuffer_s = PREBUFFER_S
         self.room_tone_dbfs: float | None = None  # sent to the page: its idle fill level
 
     # -- sending ---------------------------------------------------------------------
@@ -138,7 +141,14 @@ class WebPlayer:
 
     # -- PlayerLike ------------------------------------------------------------------
     def start(self) -> None:
-        self._post(json.dumps({"type": "config", "sampleRate": self.sample_rate, "roomToneDbfs": self.room_tone_dbfs}))
+        self._post(json.dumps({
+            "type": "config", "sampleRate": self.sample_rate, "roomToneDbfs": self.room_tone_dbfs,
+            "prebufferS": self.prebuffer_s,
+        }))
+
+    def end_turn(self) -> None:
+        """No more audio for this reply: the page may drain what it holds below its prebuffer."""
+        self._post(json.dumps({"type": "eot"}))
 
     def write(self, pcm: bytes | bytearray | memoryview | np.ndarray) -> None:
         if self._closed:
