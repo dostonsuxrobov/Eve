@@ -38,7 +38,7 @@ eva/
   mocks.py           doubles + the harness helpers used by tests/ and bench/
   web/               the phone client: server.py (page + WebSocket, optional TLS), transport.py
                      (WebMic / WebPlayer behind the pipeline's frame and PlayerLike contracts), static/index.html
-run.py               CLI entry: `python run.py --user-name Doston [--lang ru] [--preset local]`
+run.py               CLI entry: `python run.py --user-name Doston [--preset local]` (English; `--lang auto|ru` frozen)
 tests/               pytest, offline (pipeline scenarios on doubles, failover, units)
 bench/               e2e_sim.py (real providers, --outage), conversation_eval.py + scenarios.json, summarize_e2e.py
 docs/                DESIGN.md (this), MEASUREMENTS.md (numbers, known issues), EVAL_REPORT.md
@@ -58,9 +58,11 @@ and a few seconds of CPU model loading). Sample rates must match across a TTS pa
 
 ## Languages
 
-`eva/lang.py` resolves `--lang` into a plan: `auto` loads every language's assets, lets
-Scribe auto-detect and switches the voice per sentence by script; `en` / `ru` lock the
-session (STT hint, pinned voice, that language's fillers and persona file). The code is
+`eva/lang.py` resolves `--lang` into a plan; the default is `DEFAULT_MODE` (`en`: English only
+until the English-first gates in `CLAUDE.md` hold, Russian frozen). `en` / `ru` lock the session
+(STT hint, pinned voice, that language's fillers and persona file, no language switching);
+`auto` loads every language's assets, boxes Scribe into them and switches the voice per
+sentence by script. The code is
 script-agnostic; everything that differs is data under `eva/assets/`.
 
 ## Hard-won environment facts

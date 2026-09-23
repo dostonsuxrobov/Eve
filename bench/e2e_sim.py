@@ -40,7 +40,7 @@ from rich.markup import escape  # noqa: E402
 from rich.table import Table  # noqa: E402
 
 from eva.config import BRAINS, DEFAULT_PRESET, PRESETS, SAMPLES_DIR, load_keys  # noqa: E402
-from eva.lang import modes as lang_modes  # noqa: E402
+from eva.lang import DEFAULT_MODE as DEFAULT_LANG_MODE, modes as lang_modes  # noqa: E402
 from eva.interfaces import MIC_SAMPLE_RATE  # noqa: E402
 from eva.mocks import EventLog, MockPlayer, turn_rows as _turn_rows  # noqa: E402
 from eva.pipeline import VoiceAgent  # noqa: E402
@@ -290,7 +290,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--preset", default=DEFAULT_PRESET, choices=sorted(PRESETS))
     ap.add_argument("--brain", choices=sorted(BRAINS), help="LLM override (default: the preset's)")
-    ap.add_argument("--lang", default="auto", choices=lang_modes())
+    ap.add_argument("--lang", default=DEFAULT_LANG_MODE, choices=lang_modes())
     ap.add_argument("--utterances", default="samples/user_hello.wav,samples/user_rough_day.wav,samples/user_task.wav")
     ap.add_argument("--gap", type=float, default=6.0, help="seconds after a turn before the next utterance")
     g = ap.add_mutually_exclusive_group()

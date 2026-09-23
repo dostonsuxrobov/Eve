@@ -407,7 +407,8 @@ class VoiceAgent:
     ) -> None:
         self.stt, self.llm, self.tts = stt, llm, tts
         # the session's language codes; a transcript the STT labels outside them is a
-        # mishearing and never switches her language (see _follow_lang)
+        # mishearing and never switches her language, and a one-language session never
+        # switches at all (see _follow_lang)
         self.languages = {c.lower() for c in languages or ()}
         self.system_prompt = system_prompt
         self.tools = list(tools)
@@ -541,6 +542,8 @@ class VoiceAgent:
         if heard and self.languages and heard not in self.languages:
             self._emit("stt_foreign", {"lang": heard_as, "kept": self._user_lang, "text": text[:80]})
             return
+        if len(self.languages) == 1:
+            return  # a one-language session (the English default) never switches, whatever the script
         lang = detect_lang(text, default=self._user_lang)
         if lang != self._user_lang:
             self._select_lang(lang)

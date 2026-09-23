@@ -969,6 +969,27 @@ async def scenario_foreign_language_label_keeps_language(verbose: bool) -> tuple
     c.ok(agent._user_lang == "en", f"final language {agent._user_lang}")
     return c, {"turns": _turn_rows(turns), "events": seen}
 
+async def scenario_english_session_never_switches(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(za) English first: in a one-language session a Cyrillic transcript (Scribe can
+    still write Russian speech in Cyrillic under an English hint) is answered, but never
+    switches her language, fillers or hints to Russian."""
+    c = Check()
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    stt = MockSTT(["Привет, как дела?", "Okay, how are you?"], delay_s=0.1, heard_as=["en", "en"])
+    llm = MockLLM(["Sorry, I only caught part of that. English?", "Good, you?"], ttft_s=0.1)
+    tts = MockTTS(ttfa_s=0.1, realtime_factor=0.3)
+    seg = ScriptedSegmenter(script=[(0.3, 1.0), (4.0, 1.0)])
+    agent = _mock_agent(
+        stt=stt, llm=llm, tts=tts, player=player, segmenter=seg, frames=silent_frames(30),
+        settings=_settings(filler_after_ms=0), log=log, max_turns=2, languages=["en"],
+    )
+    turns = await agent.run()
+    c.ok(len(turns) == 2, f"expected 2 turns, got {len(turns)}")
+    c.ok(not log.all("language"), f"an English-only session switched language: {log.all('language')}")
+    c.ok(agent._user_lang == "en", f"language {agent._user_lang}")
+    return c, {"turns": _turn_rows(turns)}
+
 SCENARIOS = [
     ("a_normal_two_turns", scenario_normal_two_turns),
     ("b_barge_in", scenario_barge_in),
@@ -996,6 +1017,7 @@ SCENARIOS = [
     ("x_storm_needs_final_text", scenario_storm_needs_final_text),
     ("y_continuous_audio_inside_a_chunk", scenario_continuous_audio_inside_a_chunk),
     ("z_foreign_language_label_keeps_language", scenario_foreign_language_label_keeps_language),
+    ("za_english_session_never_switches", scenario_english_session_never_switches),
 ]
 
 

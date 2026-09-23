@@ -15,9 +15,8 @@ Windows 11 laptop (RTX 4050 6 GB, Python 3.13). Not built for scale.
 ## Run
 
 ```
-.venv\Scripts\python.exe run.py --user-name Doston             # preset maya, auto language
+.venv\Scripts\python.exe run.py --user-name Doston             # preset maya, English
 .venv\Scripts\python.exe run.py --preset local                 # everything on this laptop, offline
-.venv\Scripts\python.exe run.py --user-name Doston --lang ru   # locked to Russian
 .venv\Scripts\python.exe run.py --web --tls --user-name Doston  # talk from your phone (see below)
 .venv\Scripts\python.exe run.py --text                         # type instead of talk (she still speaks)
 .venv\Scripts\python.exe run.py --once "hey, how's it going"   # one typed turn, then exit
@@ -91,9 +90,13 @@ laptop's echo defences come back on for that connection so she does not answer h
 
 ## Languages
 
-`--lang auto` (default) follows you: Scribe auto-detects, the voice switches per sentence by
-script, fillers follow your last turn, and the persona is the English prompt with a bilingual
-rule. `--lang en` / `--lang ru` lock the session: Scribe gets a language hint (more reliable on
+**English only for now.** Eva is being built in English until it reaches the quality gates in
+`CLAUDE.md` ("English first"); the default session loads, renders and sends nothing Russian.
+Russian is frozen, not removed: the options below still work but are not developed or measured.
+
+`--lang en` (default) and `--lang ru` lock the session to one language; `--lang auto` follows you:
+Scribe is boxed into the session's languages, the voice switches per sentence by script, fillers
+follow your last turn, and the persona is the English prompt with a bilingual rule. Locked: Scribe gets a language hint (more reliable on
 one-word answers), the voice is pinned, and the persona is `eva/assets/personas/<lang>/eva.md`
 when it exists (a prompt written in the language beats an English prompt with a "speak natural
 Russian" rule). Everything language-specific is data:

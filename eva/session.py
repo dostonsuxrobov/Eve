@@ -13,7 +13,7 @@ from typing import Any, Callable
 from .config import MEMORY_FILE, Keys, Preset
 from .factory import Stack, build_stack
 from .interfaces import Tool
-from .lang import LangPlan, plan as lang_plan
+from .lang import DEFAULT_MODE, LangPlan, plan as lang_plan
 from .memory import Memory
 from .personas import Persona, load_persona, render
 from .tools import get_tools, tool_notes
@@ -51,11 +51,29 @@ class Session:
         return {"type": "session_start", "user_name": user_name, "lang": self.plan.primary.code, "language": self.plan.primary.name}
 
 
+def stt_language_settings(plan: LangPlan, stt_kind: str) -> dict[str, Any]:
+    """What the STT is told about the session's languages.
+
+    Locked (the English default): the one language as a hint, nothing else. Auto: the
+    realtime socket is boxed into every active language (the batch endpoint's
+    multi-language support is unverified, so only realtime is boxed).
+    """
+    out: dict[str, Any] = {}
+    if plan.stt_language_code and stt_kind.startswith("elevenlabs"):
+        out["language"] = plan.stt_language_code
+    if stt_kind == "elevenlabs-realtime":
+        primary, secondary = plan.stt_box
+        if primary and secondary:
+            out.update(language=primary, secondary_languages=secondary)
+        out["language_detection"] = True
+    return out
+
+
 def build_session(
     preset: Preset,
     keys: Keys,
     *,
-    lang: str = "auto",
+    lang: str = DEFAULT_MODE,
     brain: str | None = None,
     persona: str | None = None,
     user_name: str = "",
@@ -73,15 +91,7 @@ def build_session(
     ``user_name`` is known (see ``Memory.drop_name_facts``).
     """
     plan = lang_plan(lang)
-    stt_overrides: dict[str, Any] = {}
-    if plan.stt_language_code and preset.stt["kind"].startswith("elevenlabs"):
-        stt_overrides["language"] = plan.stt_language_code
-    if preset.stt["kind"] == "elevenlabs-realtime":
-        # the batch endpoint's multi-language support is unverified: only realtime is boxed
-        primary, secondary = plan.stt_box
-        if primary and secondary:
-            stt_overrides.update(language=primary, secondary_languages=secondary)
-        stt_overrides["language_detection"] = True
+    stt_overrides = stt_language_settings(plan, preset.stt["kind"])
     tts_overrides: dict[str, Any] = {}
     if preset.tts["kind"] == "elevenlabs":
         tts_overrides = {"voice": plan.voice, "voices_by_lang": plan.voices_by_lang}

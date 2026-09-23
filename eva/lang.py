@@ -5,9 +5,9 @@ Everything that changes with the language lives in ``eva/assets/lang/<code>.toml
 ``eva/assets/personas/<code>/``. The code is script-agnostic; this module only decides
 which assets are active for a session.
 
-Modes (:func:`plan`):
+Modes (:func:`plan`); the default is :data:`DEFAULT_MODE` (``en`` while Russian is frozen):
 
-``auto`` (default)
+``auto``
     Every language is active. The STT is boxed into them (``LangPlan.stt_box``: the
     primary as ``language_code``, the rest as ``secondary_languages``) and reports the
     language it heard; the pipeline never switches on one outside the box. The voice is picked per sentence
@@ -30,6 +30,10 @@ ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 LANG_DIR = ASSETS_DIR / "lang"
 DEFAULT_LANG = "en"
 AUTO = "auto"
+# The session language when nobody asks for one. English only until English is done
+# (CLAUDE.md, "English first"): Russian is frozen, its assets stay and load only with
+# --lang auto / --lang ru. Adding languages back starts by setting this to AUTO.
+DEFAULT_MODE = DEFAULT_LANG
 
 
 @dataclass(frozen=True)
@@ -105,7 +109,7 @@ def plan(mode: str, languages: dict[str, Language] | None = None) -> LangPlan:
     langs = languages if languages is not None else load_languages()
     if not langs:
         raise RuntimeError(f"no language files in {LANG_DIR}")
-    mode = (mode or AUTO).lower()
+    mode = (mode or DEFAULT_MODE).lower()
     if mode == AUTO:
         primary = langs.get(DEFAULT_LANG) or next(iter(langs.values()))
         return LangPlan(
@@ -136,4 +140,4 @@ def modes(languages: dict[str, Language] | None = None) -> list[str]:
     return [AUTO, *(languages if languages is not None else load_languages())]
 
 
-__all__ = ["ASSETS_DIR", "LANG_DIR", "DEFAULT_LANG", "AUTO", "Language", "LangPlan", "load_languages", "plan", "modes"]
+__all__ = ["ASSETS_DIR", "LANG_DIR", "DEFAULT_LANG", "DEFAULT_MODE", "AUTO", "Language", "LangPlan", "load_languages", "plan", "modes"]

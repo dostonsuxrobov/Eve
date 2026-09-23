@@ -1,9 +1,7 @@
 #!/usr/bin/env python
 """Eva CLI - talk to the voice agent.
 
-    .venv/Scripts/python.exe run.py --user-name Doston            # the cloud stack (preset maya)
-    .venv/Scripts/python.exe run.py --lang ru                     # locked to Russian
-    .venv/Scripts/python.exe run.py --preset local                # everything on this laptop
+    .venv/Scripts/python.exe run.py --user-name Doston            # the cloud stack (preset maya), English
     .venv/Scripts/python.exe run.py --preset local                # everything on this laptop
     .venv/Scripts/python.exe run.py --web --tls                   # talk from your phone: https://<laptop-ip>:8443
     .venv/Scripts/python.exe run.py --list-devices
@@ -34,7 +32,7 @@ from rich.console import Console  # noqa: E402
 from rich.markup import escape  # noqa: E402
 
 from eva.config import BRAINS, DEFAULT_PRESET, MEMORY_FILE, PRESETS, PipelineSettings, load_keys  # noqa: E402
-from eva.lang import modes as lang_modes  # noqa: E402
+from eva.lang import DEFAULT_MODE as DEFAULT_LANG_MODE, modes as lang_modes  # noqa: E402
 
 console = Console(highlight=False)
 log = logging.getLogger("eva.run")
@@ -56,7 +54,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--user-name")
     ap.add_argument("--mute-fillers", action="store_true", help="no 'hmm' while thinking")
     ap.add_argument("--no-greeting", action="store_true", help="don't have her say hello when the session starts")
-    ap.add_argument("--lang", default="auto", choices=lang_modes(), help="auto: follow you, switching per sentence; en / ru: lock the session to one language")
+    ap.add_argument("--lang", default=DEFAULT_LANG_MODE, choices=lang_modes(), help=f"default {DEFAULT_LANG_MODE}: English only while Russian is frozen (CLAUDE.md); auto: follow you between languages; ru: locked to Russian")
     ap.add_argument("--web", action="store_true", help="serve the phone/browser client instead of using this machine's mic and speakers")
     ap.add_argument("--port", type=int, help="port for --web (default 8080, or 8443 with --tls)")
     ap.add_argument("--tls", action="store_true", help="--web over https with a self-signed certificate (browsers need it for the mic)")
@@ -234,6 +232,8 @@ async def amain(args: argparse.Namespace) -> int:
         console.print(f"[dim]memory: dropped {len(session.dropped_facts)} stale name fact(s): {escape('; '.join(session.dropped_facts))}[/]")
     if plan.locked and session.persona.lang != plan.mode:
         console.print(f"[dim]no {plan.mode} version of persona {session.persona.name!r}; using the English prompt with a locked-language rule[/]")
+    if plan.mode == DEFAULT_LANG_MODE == "en":
+        console.print("[dim]English only: Russian is frozen until English is done (--lang auto brings it back)[/]")
     console.print(f"[dim]language: {plan.mode} | persona: {session.persona.name} ({session.persona.lang}) | brain: {llm.name}[/]")
     if args.web:
         from eva.web.server import serve_web

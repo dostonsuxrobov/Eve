@@ -37,6 +37,30 @@ def test_language_plans() -> None:
     assert ru.stt_box == ("ru", [])
 
 
+def test_default_session_is_english_only() -> None:
+    """English first (CLAUDE.md): with no --lang nothing Russian is loaded, rendered,
+    sent to the STT or put in the prompt. Setting lang.DEFAULT_MODE = AUTO lifts it."""
+    import re
+    import sys
+
+    from eva.session import stt_language_settings
+
+    assert lang.DEFAULT_MODE == "en"
+    p = lang.plan(None)  # type: ignore[arg-type]
+    assert p.mode == "en" and p.locked and p.codes == ["en"]
+    assert p.voices_by_lang == {} and p.voice == lang.load_languages()["en"].voice
+    for attr in ("fillers", "tool_hints", "backchannels"):
+        assert set(p.by_lang(attr)) == {"en"}, attr  # nothing Russian is pre-rendered
+    assert stt_language_settings(p, "elevenlabs-realtime") == {"language": "en", "language_detection": True}
+    prompt = render(load_persona("eva", lang=p.persona_lang), supports_audio_tags=True, memory_text="",
+                    user_name="Doston", tool_notes="", locked_language=p.primary.name, languages=[l.name for l in p.active])
+    assert "always answer in English" in prompt and not re.search("[Ѐ-ӿ]", prompt)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import run
+
+    assert run.parse_args([]).lang == "en"
+
+
 def test_scribe_realtime_language_box() -> None:
     from urllib.parse import parse_qs, urlsplit
 

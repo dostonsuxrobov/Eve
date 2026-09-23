@@ -178,7 +178,7 @@ _MAYA_SETTINGS = PipelineSettings(
     first_chunk_min_chars=40, min_chunk_chars=20,
 )
 _MAYA_EARS_AND_VOICE = (
-    "Scribe realtime STT (boxed into English + Russian), ElevenLabs v3 Conversational on the eva_en / eva_ru voices with one delivery cue per reply, "
+    "Scribe realtime STT, ElevenLabs v3 Conversational on the eva_en voice with one delivery cue per reply, "
     "backchannels (headphones). Falls back to Parakeet / Ollama qwen3:8b / Kokoro when a cloud service "
     "stops answering."
 )

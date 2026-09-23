@@ -9,7 +9,7 @@ the bug hunts), `docs/EVAL_REPORT.md` (why the brain and the persona were chosen
 Eva is a **realistic voice agent**: you talk, she listens while you speak, answers about a
 second later, can be interrupted, remembers you, does small things. Today it is an early
 prototype of a *personal companion* (English and Russian, friend register) that one person
-uses daily from a laptop or a phone. It is a **serious, long-lived project**, not a demo: the
+uses daily from a laptop or a phone, **in English only for now** (see "English first"). It is a **serious, long-lived project**, not a demo: the
 same agent is meant to grow into work — **customer support, truck dispatching, basic friend
 conversation** — through different personas, tool sets and deployments on one pipeline. Two
 goals in that order: **feel real first, then be useful**. Nothing that makes her more useful
@@ -21,18 +21,49 @@ every judgement about what is *true*.
 
 ## Current state (2026-09-23)
 
-* Stack `maya`: ElevenLabs Scribe v2 realtime (STT, boxed into English + Russian) → Cerebras
+* Stack `maya`: ElevenLabs Scribe v2 realtime (STT, language hint `en`) → Cerebras
   `qwen-3.8-27b` (brain, reasoning low) → ElevenLabs v3 Conversational (voice, one delivery cue
-  per reply, `eva_en` / `eva_ru` voices).
+  per reply, `eva_en` voice).
   Falls back per provider to the local stack (Parakeet / Ollama `qwen3:8b` / Kokoro) when a
   cloud service stops answering (`eva/failover.py`). Preset `local` is that stack offline.
 * Runs from the laptop (`run.py`) or from a phone in the browser (`run.py --web --tls`,
-  `eva/web/`). Languages: `--lang auto|en|ru`; all language data is under `eva/assets/`.
+  `eva/web/`). Language: English only by default (`lang.DEFAULT_MODE = "en"`); Russian is frozen
+  but intact (`--lang auto|ru`, data under `eva/assets/`).
 * Measured: ~1.0–1.5 s from the user's last word to her first (before the v3 Conversational
   switch, which took ~0.35 s off first audio); 6.2/10 in the conversation eval; 6/6 on the
   tool-calling probe; ~$4.50 per hour on v3, ~$2.85 estimated on v3 Conversational (half the
   voice price; the voice is most of the bill).
-* 46 offline tests (`pytest tests`), a real-audio simulator and a conversation eval in `bench/`.
+* 48 offline tests (`pytest tests`), a real-audio simulator and a conversation eval in `bench/`.
+
+## English first (owner's decision, 2026-09-23)
+
+Eva is built **in English only** until English reaches the quality gates below; then other
+languages come back one at a time. Russian is **frozen, not deleted**: `eva/assets/lang/ru.toml`,
+`eva/assets/personas/ru/`, the language box and `--lang auto|ru` stay and their offline tests
+keep passing, so bringing it back costs a one-line change (`eva/lang.py: DEFAULT_MODE = AUTO`) plus
+fresh measurements.
+
+* **Nothing Russian runs in a default session:** no Russian voice, fillers or hints are
+  rendered, the STT gets `language_code=en` only, the prompt carries the English persona with
+  "always answer in English", and a one-language session never switches language (a Cyrillic
+  transcript is answered in English). `test_default_session_is_english_only` and
+  `za_english_session_never_switches` fail if any of that creeps back.
+* **No Russian work while frozen:** no Russian eval runs (`bench/conversation_eval.py --lang ru`),
+  no Russian samples in benchmarks, no Russian voice tuning or voice design, no provider chosen
+  or rejected on its Russian. English-only providers (e.g. Deepgram Flux STT, Chatterbox Turbo /
+  Orpheus voices) are fair candidates. Keep new code language-agnostic (language data in
+  `eva/assets/`), so the freeze stays cheap to lift.
+* **The gates (all must hold, measured, before a second language):**
+
+  | | 2026-09-23 | gate |
+  |---|---|---|
+  | last word → her first audio, median over a real session | ~1.0–1.5 s (before v3 Conv.'s −0.35 s) | ≤ 0.8 s |
+  | conversation eval (`bench/conversation_eval.py`) | 6.2 / 10 | ≥ 7.5 |
+  | cost per hour, measured from a real session | ~$2.85 estimated | ≤ $1.50 |
+  | emotion: blind listening test (owner judges) | not measured yet | she wins or ties the best alternative |
+  | stability: daily use with no new audio bug | — | 2 weeks |
+
+  The owner may change a gate; record the change and the reason here.
 
 ## How to work here
 
@@ -77,10 +108,11 @@ line saying why. Keep that: it is how bugs get reported.
 * **Edges:** v3 clips are trimmed hot (first 10 ms −39 dBFS, last 10 ms −31); 120/280 ms
   reply fades, 40 ms fades and a 220 ms pause at chunk boundaries only. Room tone is off
   (audible on a phone speaker). Loudness leveled per model × voice (`eva/audio/leveler.py`).
-* **Languages:** in auto mode Scribe gets `language_code` + `secondary_languages` (the box:
-  unboxed it heard English and Russian as Dutch, `ja`, `mk`); it is a bias, so the pipeline
-  never switches her language on a label outside the session's (`stt_foreign`), and the persona
-  says a line in another language is a mishearing.
+* **Languages:** English only by default (above). For multi-language sessions (`--lang auto`,
+  frozen): Scribe gets `language_code` + `secondary_languages` (the box: unboxed it heard English
+  and Russian as Dutch, `ja`, `mk`); it is a bias, so the pipeline never switches her language on
+  a label outside the session's (`stt_foreign`), and the persona says a line in another language
+  is a mishearing.
 * **Turn taking:** 500 ms endpoint; unfinished transcripts get a 600 ms grace and merge;
   bare hesitations wait; the Whisper phantom list applies only to Whisper-class STTs.
 * **Speaker echo (laptop):** barge-in while she is audible needs real words in the partial
@@ -107,19 +139,24 @@ line saying why. Keep that: it is how bugs get reported.
 * Ollama at `127.0.0.1`, never `localhost` (+2 s). Cerebras needs a custom User-Agent.
 * Windows Store Python cannot open the mic; the venv is a uv CPython 3.13.
 
-## Roadmap (owner's order of value)
+## Roadmap (English phase, in order; each item moves a gate)
 
-1. **Smart endpointing**: predict end-of-turn from Scribe's partials; cut the 500 ms wait to
-   ~200 ms on a complete sentence, wait longer on a trailing one (~0.3 s off every reply).
-2. **Her own voice**: an ElevenLabs voice design / clone instead of stock voices.
-3. **Episodic memory**: what happened last time, moods over days, not a flat fact list.
-4. **Tools that make her useful**: reminders that fire, calendar, messages, a web lookup;
-   tool scenarios in the eval. Then the first *job* persona (customer support or dispatch)
-   as data on the same loop, with its own scenarios and its own honesty checks.
-5. **Always-on deployment** off the laptop (a small box or a host); the code does not care
-   where the mic and the models live.
-6. Russian persona (`eva/assets/personas/ru/eva.md`) is a draft: the owner rewrites the register.
-7. Cost: v3 Conversational halved the voice price (2026-09-23). Next: log characters sent vs
-   heard (lookahead chunks billed on barge-in), cache fillers on disk, then a blind en/ru test of
-   Inworld TTS-2 (~$5–25 / M chars) *before* designing her own voice (a voice ties you to a
-   provider); Qwen3-TTS (open, en+ru, instructable emotion) replaces Kokoro as the fallback.
+1. **Smart endpointing** (latency gate): predict end-of-turn from the partials; cut the 500 ms
+   wait to ~200 ms on a complete sentence, wait longer on a trailing one (~0.3 s off every
+   reply). Try an English turn-taking STT (Deepgram Flux) against Scribe + our own predictor.
+2. **Emotion, measured** (emotion gate): a blind listening set (the same lines and cues across
+   voices) and emotion scenarios in the conversation eval, so "sounds real" becomes a number.
+3. **Voice provider** (cost + emotion gates): blind English test of v3 Conversational vs
+   Inworld TTS-2 (~$5–25 / M chars) vs Cartesia; log characters sent vs heard (lookahead chunks
+   billed on barge-in). Decide *before* item 4: a designed voice ties her to a provider.
+4. **Her own voice**: a designed / cloned English voice on the chosen provider.
+5. **Episodic memory**: what happened last time, moods over days, not a flat fact list.
+6. **Tools that make her useful**: reminders that fire, calendar, messages, a web lookup; tool
+   scenarios in the eval. Then the first *job* persona (customer support or dispatch) as data
+   on the same loop, with its own scenarios and honesty checks.
+7. **Always-on deployment** off the laptop (a small box or a host); a GPU box makes an open
+   English voice (Chatterbox Turbo, Orpheus) a candidate main voice at $0 per hour, and an
+   expressive fallback instead of Kokoro.
+
+After the gates: other languages one at a time, starting with Russian (its persona is a draft
+the owner rewrites; its voice and STT are re-measured, not assumed).
