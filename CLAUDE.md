@@ -19,17 +19,20 @@ The user is Doston (native Russian speaker, English too; developer). Treat him a
 of every judgement call about how she should *sound*; treat measurements as the owner of
 every judgement about what is *true*.
 
-## Current state (2026-09-20)
+## Current state (2026-09-23)
 
-* Stack `maya`: ElevenLabs Scribe v2 realtime (STT) → Cerebras `qwen-3.8-27b` (brain, reasoning
-  low) → ElevenLabs v3 (voice, one delivery cue per reply, `eva_en` / `eva_ru` voices).
+* Stack `maya`: ElevenLabs Scribe v2 realtime (STT, boxed into English + Russian) → Cerebras
+  `qwen-3.8-27b` (brain, reasoning low) → ElevenLabs v3 Conversational (voice, one delivery cue
+  per reply, `eva_en` / `eva_ru` voices).
   Falls back per provider to the local stack (Parakeet / Ollama `qwen3:8b` / Kokoro) when a
   cloud service stops answering (`eva/failover.py`). Preset `local` is that stack offline.
 * Runs from the laptop (`run.py`) or from a phone in the browser (`run.py --web --tls`,
   `eva/web/`). Languages: `--lang auto|en|ru`; all language data is under `eva/assets/`.
-* Measured: ~1.0–1.5 s from the user's last word to her first; 6.2/10 in the conversation
-  eval; 6/6 on the tool-calling probe; ~$4.50 per hour of conversation, 80 % of it the voice.
-* 44 offline tests (`pytest tests`), a real-audio simulator and a conversation eval in `bench/`.
+* Measured: ~1.0–1.5 s from the user's last word to her first (before the v3 Conversational
+  switch, which took ~0.35 s off first audio); 6.2/10 in the conversation eval; 6/6 on the
+  tool-calling probe; ~$4.50 per hour on v3, ~$2.85 estimated on v3 Conversational (half the
+  voice price; the voice is most of the bill).
+* 46 offline tests (`pytest tests`), a real-audio simulator and a conversation eval in `bench/`.
 
 ## How to work here
 
@@ -66,12 +69,18 @@ line saying why. Keep that: it is how bugs get reported.
   and gpt-5.6-luna 7.7 but OpenAI is not the brain (owner's constraint: open models). The
   live comparison settled it: "much more natural by much larger margins". `qwen3:8b` is the
   first local model that calls tools correctly (6/6) and is the fallback brain.
-* **Voice: v3 for every sentence.** A Flash first chunk was 0.4 s faster but a different
-  timbre, pace and noise floor on the first sentence of every reply. One delivery cue per
-  reply, inherited by every chunk: a voice does not change colour every sentence.
+* **Voice: one model for every sentence, v3 Conversational.** A Flash first chunk was 0.4 s
+  faster but a different timbre, pace and noise floor on the first sentence of every reply.
+  v3 Conversational (2026-09-23) is half v3's price, 0.35 s sooner to first audio, same tags,
+  cleaner clip ends, ~20 % quicker pace; `"model_id": "eleven_v3"` in `config.py` switches back.
+  One delivery cue per reply, inherited by every chunk: a voice does not change colour every sentence.
 * **Edges:** v3 clips are trimmed hot (first 10 ms −39 dBFS, last 10 ms −31); 120/280 ms
   reply fades, 40 ms fades and a 220 ms pause at chunk boundaries only. Room tone is off
   (audible on a phone speaker). Loudness leveled per model × voice (`eva/audio/leveler.py`).
+* **Languages:** in auto mode Scribe gets `language_code` + `secondary_languages` (the box:
+  unboxed it heard English and Russian as Dutch, `ja`, `mk`); it is a bias, so the pipeline
+  never switches her language on a label outside the session's (`stt_foreign`), and the persona
+  says a line in another language is a mishearing.
 * **Turn taking:** 500 ms endpoint; unfinished transcripts get a 600 ms grace and merge;
   bare hesitations wait; the Whisper phantom list applies only to Whisper-class STTs.
 * **Speaker echo (laptop):** barge-in while she is audible needs real words in the partial
@@ -110,4 +119,7 @@ line saying why. Keep that: it is how bugs get reported.
 5. **Always-on deployment** off the laptop (a small box or a host); the code does not care
    where the mic and the models live.
 6. Russian persona (`eva/assets/personas/ru/eva.md`) is a draft: the owner rewrites the register.
-7. Cost: the voice is 80 % of the bill; test the cheaper v3 tier, keep replies short.
+7. Cost: v3 Conversational halved the voice price (2026-09-23). Next: log characters sent vs
+   heard (lookahead chunks billed on barge-in), cache fillers on disk, then a blind en/ru test of
+   Inworld TTS-2 (~$5–25 / M chars) *before* designing her own voice (a voice ties you to a
+   provider); Qwen3-TTS (open, en+ru, instructable emotion) replaces Kokoro as the fallback.

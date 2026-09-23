@@ -941,6 +941,34 @@ async def scenario_continuous_audio_inside_a_chunk(verbose: bool) -> tuple[Check
     return c, {"turns": _turn_rows(turns)}
 
 
+async def scenario_foreign_language_label_keeps_language(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(z) live log 2026-09-23: Scribe heard Russian / English as Dutch ("Nee, het is niet.")
+    and she switched to English fillers and answered in Dutch. A transcript the STT labels
+    outside the session's languages must not switch her language; it is still answered
+    (the persona rule treats it as a mishearing), and an in-box label still switches."""
+    c = Check()
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    stt = MockSTT(
+        ["Привет, как дела?", "Nee, het is niet.", "Okay, English now."], delay_s=0.1, heard_as=["ru", "nl", "en"]
+    )
+    llm = MockLLM(["Привет!", "Не расслышала, повтори?", "Sure."], ttft_s=0.1)
+    tts = MockTTS(ttfa_s=0.1, realtime_factor=0.3)
+    seg = ScriptedSegmenter(script=[(0.3, 1.0), (4.0, 1.0), (7.5, 1.0)])
+    agent = _mock_agent(
+        stt=stt, llm=llm, tts=tts, player=player, segmenter=seg, frames=silent_frames(30),
+        settings=_settings(filler_after_ms=0), log=log, max_turns=3, languages=["en", "ru"],
+    )
+    seen: list[str] = []
+    log.hooks.append(lambda name, data: seen.append(f"{name}:{data.get('lang')}") if name in ("language", "stt_foreign") else None)
+    turns = await agent.run()
+    c.ok(len(turns) == 3, f"expected 3 turns (the misheard one is still answered), got {len(turns)}")
+    c.ok(seen == ["language:ru", "stt_foreign:nl", "language:en"], f"language events {seen}")
+    foreign = log.first("stt_foreign")
+    c.ok(foreign is not None and foreign[1].get("kept") == "ru", f"stt_foreign should keep ru: {foreign}")
+    c.ok(agent._user_lang == "en", f"final language {agent._user_lang}")
+    return c, {"turns": _turn_rows(turns), "events": seen}
+
 SCENARIOS = [
     ("a_normal_two_turns", scenario_normal_two_turns),
     ("b_barge_in", scenario_barge_in),
@@ -967,6 +995,7 @@ SCENARIOS = [
     ("w_late_check_on_final_text", scenario_late_check_on_final_text),
     ("x_storm_needs_final_text", scenario_storm_needs_final_text),
     ("y_continuous_audio_inside_a_chunk", scenario_continuous_audio_inside_a_chunk),
+    ("z_foreign_language_label_keeps_language", scenario_foreign_language_label_keeps_language),
 ]
 
 

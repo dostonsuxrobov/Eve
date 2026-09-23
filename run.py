@@ -128,6 +128,8 @@ class StatusPrinter:
             console.print(f"[dim]  (batch transcription took {data['latency_s']:.2f}s)[/]")
         elif name == "language":
             console.print(f"[dim]  (switching to {data['lang']})[/]")
+        elif name == "stt_foreign":
+            console.print(f"[dim]  (heard as {escape(str(data['lang']))}, not one of ours: probably misheard, staying in {data['kept']})[/]")
         elif name == "failover":
             if data.get("first", True):
                 console.print(f"[yellow]{data['kind']}: {escape(data['from'])} not answering ({escape(data['reason'])}); using {escape(data['to'])}[/]")
@@ -306,6 +308,7 @@ async def amain(args: argparse.Namespace) -> int:
         tool_hints=session.tool_hints,
         backchannels=session.backchannels,
         on_event=printer,
+        languages=plan.codes,
     )
     t0 = time.perf_counter()
     await agent.prepare()

@@ -49,7 +49,7 @@ CERT_DIR = MODELS_DIR / "web"
 UI_EVENTS = frozenset(
     {
         "stt", "turn", "state", "filler", "barge_in", "barge_in_echo", "stt_echo", "stt_hesitation", "stt_phantom",
-        "utterance_carried", "language", "tool_call", "failover", "recovered", "echo_storm", "session_end", "error",
+        "utterance_carried", "language", "stt_foreign", "tool_call", "failover", "recovered", "echo_storm", "session_end", "error",
     }
 )
 
@@ -209,6 +209,7 @@ class WebServer:
             s.stt, s.llm, s.tts, s.system_prompt, s.tools, settings,
             frames=mic.frames(), segmenter=segmenter, player=player,
             fillers=s.fillers, tool_hints=s.tool_hints, backchannels=s.backchannels, on_event=on_event,
+            languages=s.plan.codes,
         )
         await agent.prepare()
         agent._select_lang(s.plan.primary.code)

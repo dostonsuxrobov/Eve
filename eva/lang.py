@@ -8,7 +8,9 @@ which assets are active for a session.
 Modes (:func:`plan`):
 
 ``auto`` (default)
-    Every language is active. The STT auto-detects, the voice is picked per sentence
+    Every language is active. The STT is boxed into them (``LangPlan.stt_box``: the
+    primary as ``language_code``, the rest as ``secondary_languages``) and reports the
+    language it heard; the pipeline never switches on one outside the box. The voice is picked per sentence
     by script (``voices_by_lang``), fillers follow the language of the user's last
     turn, the persona is the English prompt with the bilingual language rule.
 ``en`` / ``ru`` (locked)
@@ -77,6 +79,21 @@ class LangPlan:
     @property
     def locked(self) -> bool:
         return self.mode != AUTO
+
+    @property
+    def codes(self) -> list[str]:
+        """The session's language codes, primary first (``["en", "ru"]``)."""
+        return [lang.code for lang in self.active]
+
+    @property
+    def stt_box(self) -> tuple[str | None, list[str]]:
+        """``(language_code, secondary_languages)`` for the STT: the hint when locked,
+        otherwise every active language (primary first) so the recogniser does not
+        wander into the ~90 others (Scribe heard Russian / English as Dutch, ``ja``, ``mk``)."""
+        if self.locked:
+            return self.stt_language_code, []
+        codes = [lang.stt_language_code for lang in self.active if lang.stt_language_code]
+        return (codes[0], codes[1:]) if len(codes) > 1 else (None, [])
 
     def by_lang(self, attr: str) -> dict[str, list[str]]:
         """``{"en": [...], "ru": [...]}`` for ``fillers`` / ``tool_hints`` / ``backchannels``."""

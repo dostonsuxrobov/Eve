@@ -403,8 +403,12 @@ class VoiceAgent:
         sanitizer: Sanitizer | None = None,
         tool_executor: ToolExecutor | None = None,
         pending_events: "asyncio.Queue[dict[str, Any]] | None" = None,
+        languages: "list[str] | None" = None,
     ) -> None:
         self.stt, self.llm, self.tts = stt, llm, tts
+        # the session's language codes; a transcript the STT labels outside them is a
+        # mishearing and never switches her language (see _follow_lang)
+        self.languages = {c.lower() for c in languages or ()}
         self.system_prompt = system_prompt
         self.tools = list(tools)
         self.settings = settings
@@ -528,6 +532,19 @@ class VoiceAgent:
                 "backchannels": sum(len(v) for v in self._backchannel_audio_by_lang.values()),
             },
         )
+
+    def _follow_lang(self, text: str, heard_as: str | None) -> None:
+        """Follow the user into the language of ``text`` unless the STT heard it as a
+        language outside the session's (Scribe labelled Russian / English speech as
+        Dutch, ``ja``, ``mk``): then her language, fillers and hints stay put."""
+        heard = (heard_as or "").lower()[:2]  # Scribe answers ISO 639-1 ("en"); 639-3 starts the same for en/ru
+        if heard and self.languages and heard not in self.languages:
+            self._emit("stt_foreign", {"lang": heard_as, "kept": self._user_lang, "text": text[:80]})
+            return
+        lang = detect_lang(text, default=self._user_lang)
+        if lang != self._user_lang:
+            self._select_lang(lang)
+            self._emit("language", {"lang": lang})
 
     def _select_lang(self, lang: str) -> None:
         """Switch fillers / hints to ``lang`` (falls back to any language that has them)."""
@@ -858,10 +875,7 @@ class VoiceAgent:
         if turn is None:
             return  # she finished meanwhile: it is answered as a normal turn below
         await self._interrupt("barge-in (late)", t_trigger=float(ev.t))
-        lang = detect_lang(text, default=self._user_lang)
-        if lang != self._user_lang:
-            self._select_lang(lang)
-            self._emit("language", {"lang": lang})
+        self._follow_lang(text, tr.meta.get("language"))
         metrics = TurnMetrics(speech_start=self._last_speech_start, speech_end=float(ev.t))
         self._emit("stt", {"text": text, "latency_s": round(tr.latency_s, 3), "samples": int(len(ev.pcm)), "mode": "stream", "fallback": None})
         self._launch(_Turn(metrics=metrics, kind="voice", user_text=text))
@@ -1005,10 +1019,7 @@ class VoiceAgent:
                 # the mic heard her own reply through the speakers (echo canceller still converging)
                 self._note_echo("stt_echo", {"text": text, "spoken": self._last_spoken})
                 return ""
-        lang = detect_lang(text, default=self._user_lang)
-        if lang != self._user_lang:
-            self._select_lang(lang)
-            self._emit("language", {"lang": lang})
+        self._follow_lang(text, tr.meta.get("language"))
         return text
 
     async def _commit_then_batch(self, turn: _Turn) -> Transcript:

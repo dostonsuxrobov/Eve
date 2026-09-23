@@ -62,6 +62,13 @@ LANGUAGE_RULE = (
     "friend talks: informal, natural spoken Russian, short sentences, no anglicisms and no "
     "translated-sounding phrasing; if they switch languages, switch with them without comment."
 )
+# Appended to LANGUAGE_RULE when the session's languages are known. The STT sometimes
+# renders English or Russian as Dutch ("Nee, het is niet", 2026-09-23) and she answered in Dutch.
+LANGUAGE_BOX_RULE = (
+    " You speak only {languages}. A line from {user_name} in any other language is the speech "
+    "recognition mishearing them: never answer in that language; stay in the language you were "
+    "speaking, and if you can't tell what they meant, say you didn't catch it."
+)
 LOCKED_LANGUAGE_RULE = (
     "Language. This conversation is in {language}: always answer in {language}, even if a word "
     "or a sentence from {user_name} comes through in another language."
@@ -218,13 +225,16 @@ def render(
     tool_notes: str | None = None,
     delivery_cues: bool = False,
     locked_language: str | None = None,
+    languages: list[str] | None = None,
 ) -> str:
     """Fill the persona template and return the final system prompt.
 
     ``supports_audio_tags`` decides whether ``{audio_tags_rule}`` becomes permission
     to use a few ElevenLabs-v3 style tags or a rule to never write bracketed tags.
     ``locked_language`` (a language name, e.g. "Russian") turns ``{language_rule}`` into
-    "always answer in <language>"; without it the bilingual follow-the-user rule is used.
+    "always answer in <language>"; without it the bilingual follow-the-user rule is used,
+    plus, when ``languages`` (names, e.g. ``["English", "Russian"]``) has two or more, the
+    rule that anything outside them is a mishearing.
     Empty or ``None`` ``memory_text`` / ``tool_notes`` / ``user_name`` / ``now`` get
     sensible fallbacks so the prompt never contains a dangling empty section.
     """
@@ -235,6 +245,10 @@ def render(
     else:
         delivery = AUDIO_TAGS_FORBIDDEN
     name = (user_name or "").strip() or "your friend"
+    bilingual = LANGUAGE_RULE
+    if languages and len(languages) > 1:
+        names = ", ".join(languages[:-1]) + " and " + languages[-1]
+        bilingual += LANGUAGE_BOX_RULE.replace("{languages}", names)
     values = {
         "user_name": name,
         "now": (now or "").strip() or now_string(),
@@ -244,7 +258,7 @@ def render(
         "language_rule": (
             LOCKED_LANGUAGE_RULE.replace("{language}", locked_language).replace("{user_name}", name)
             if locked_language
-            else LANGUAGE_RULE.replace("{user_name}", name)
+            else bilingual.replace("{user_name}", name)
         ),
     }
     return _SLOT_RE.sub(lambda m: values[m.group(1)], persona.template)

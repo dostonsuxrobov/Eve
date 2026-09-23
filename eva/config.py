@@ -164,8 +164,10 @@ _MAYA_STT: dict[str, Any] = {"kind": "elevenlabs-realtime", "model_id": "scribe_
 _MAYA_TTS: dict[str, Any] = {
     "kind": "elevenlabs",
     "voice": "eva_en",  # per-language voices come from eva/assets/lang/*.toml
-    "model_id": "eleven_v3",
-    # v3 for every chunk. The Flash first chunk (0.2 s to first audio against v3's 0.5-0.9) put
+    # v3 Conversational: $0.05 / 1k chars against v3's $0.10, same audio tags, and 0.27-0.33 s to
+    # first audio against v3's 0.62-0.72 (2026-09-23, docs/MEASUREMENTS.md). "eleven_v3" switches back.
+    "model_id": "eleven_v3_conversational",
+    # One model for every chunk. The Flash first chunk (0.2 s to first audio against v3's 0.5-0.9) put
     # a different timbre, pace and noise floor on the first sentence of every reply: "rushed
     # start, then it settles". Set "first_chunk_model": "eleven_flash_v2_5" to trade back.
     "first_chunk_model": None,
@@ -176,7 +178,7 @@ _MAYA_SETTINGS = PipelineSettings(
     first_chunk_min_chars=40, min_chunk_chars=20,
 )
 _MAYA_EARS_AND_VOICE = (
-    "Scribe realtime STT, ElevenLabs v3 on the eva_en / eva_ru voices with one delivery cue per reply, "
+    "Scribe realtime STT (boxed into English + Russian), ElevenLabs v3 Conversational on the eva_en / eva_ru voices with one delivery cue per reply, "
     "backchannels (headphones). Falls back to Parakeet / Ollama qwen3:8b / Kokoro when a cloud service "
     "stops answering."
 )

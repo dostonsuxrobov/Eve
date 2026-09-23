@@ -44,6 +44,8 @@ def build_stt(cfg: dict[str, Any], keys: Keys) -> STT:
             api_key=keys.elevenlabs,
             model_id=cfg.get("model_id", "scribe_v2_realtime"),
             language=cfg.get("language"),
+            secondary_languages=cfg.get("secondary_languages") or (),
+            language_detection=bool(cfg.get("language_detection", False)),
         )
     if kind == "parakeet":
         from .stt.sherpa_parakeet import SherpaParakeetSTT

@@ -17,8 +17,9 @@ Per reply (``begin_turn()``):
 * every chunk is loudness-leveled per model x voice (:mod:`eva.audio.leveler`).
 
 Voice settings: for flash / turbo a warm conversational default is
-``stability=0.45, similarity_boost=0.75, style=0.0``. ``eleven_v3`` only accepts the
-stability presets ``0.0`` (creative), ``0.5`` (natural) and ``1.0`` (robust); any other
+``stability=0.45, similarity_boost=0.75, style=0.0``. ``eleven_v3`` (and
+``eleven_v3_conversational``, which shares its limits: no ``optimize_streaming_latency``,
+no ``previous_text``, verified 2026-09-23) only accepts the stability presets ``0.0`` (creative), ``0.5`` (natural) and ``1.0`` (robust); any other
 value is snapped to the nearest preset.
 """
 from __future__ import annotations
@@ -58,6 +59,9 @@ LEVEL_SEEDS_DBFS: dict[str, float] = {
     "eleven_flash_v2_5": -21.0,
     "eleven_v3": -16.6,
     "eleven_v3/yMBZR4SLoc24wOJLWAB2": -25.4,  # eva_ru
+    # 2026-09-23, two cued lines per voice (raw): -20.3 / -16.4 and -20.7 / -20.3
+    "eleven_v3_conversational": -18.4,
+    "eleven_v3_conversational/yMBZR4SLoc24wOJLWAB2": -20.5,  # eva_ru
 }
 
 

@@ -32,6 +32,22 @@ def test_language_plans() -> None:
     assert ru.locked and ru.stt_language_code == "ru" and ru.voice == langs["ru"].voice
     assert ru.voices_by_lang == {} and list(ru.by_lang("fillers")) == ["ru"]
     assert lang.modes() == ["auto", "en", "ru"]
+    # the STT is boxed into the session's languages in auto mode, hinted when locked
+    assert auto.codes == ["en", "ru"] and auto.stt_box == ("en", ["ru"])
+    assert ru.stt_box == ("ru", [])
+
+
+def test_scribe_realtime_language_box() -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    from eva.stt.elevenlabs_realtime import ElevenLabsRealtimeSTT
+
+    boxed = ElevenLabsRealtimeSTT("k", language="en", secondary_languages=["ru"], language_detection=True)
+    q = parse_qs(urlsplit(boxed._url(16_000)).query)
+    assert q["language_code"] == ["en"] and q["secondary_languages"] == ["ru"]
+    assert q["include_language_detection"] == ["true"]
+    plain = parse_qs(urlsplit(ElevenLabsRealtimeSTT("k")._url(16_000)).query)
+    assert "language_code" not in plain and "secondary_languages" not in plain and "include_language_detection" not in plain
 
 
 def test_personas_per_language() -> None:
@@ -44,6 +60,9 @@ def test_personas_per_language() -> None:
     assert "Достон" in prompt and "always answer in Russian" in prompt
     auto_prompt = render(en, supports_audio_tags=False, memory_text="", user_name="Sam", tool_notes="")
     assert "language Sam just used" in auto_prompt
+    assert "mishearing" not in auto_prompt  # no language list, no box rule
+    boxed = render(en, supports_audio_tags=False, memory_text="", user_name="Sam", tool_notes="", languages=["English", "Russian"])
+    assert "You speak only English and Russian" in boxed and "never answer in that language" in boxed
 
 
 # ------------------------------------------------------------------- delivery

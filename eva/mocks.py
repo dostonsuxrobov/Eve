@@ -54,11 +54,19 @@ class MockSTT:
 
     name = "mock-stt"
 
-    def __init__(self, texts: list[str], delay_s: float = 0.3) -> None:
+    def __init__(self, texts: list[str], delay_s: float = 0.3, *, heard_as: list[str | None] | None = None) -> None:
         self._texts = list(texts)
         self._i = 0
         self.delay_s = delay_s
         self.calls: list[dict[str, Any]] = []
+        # per transcript: the language the STT reports (meta["language"], like Scribe's detection)
+        self._heard_as = list(heard_as or [])
+
+    def _meta(self, i: int, **extra: Any) -> dict[str, Any]:
+        meta: dict[str, Any] = {"mock": True, **extra}
+        if i < len(self._heard_as) and self._heard_as[i]:
+            meta["language"] = self._heard_as[i]
+        return meta
 
     async def warmup(self) -> None:
         return None
@@ -66,13 +74,14 @@ class MockSTT:
     async def transcribe(self, pcm: np.ndarray, sample_rate: int = MIC_SAMPLE_RATE) -> Transcript:
         t0 = time.perf_counter()
         await asyncio.sleep(self.delay_s)
-        text = self._texts[self._i] if self._i < len(self._texts) else ""
+        i = self._i
+        text = self._texts[i] if i < len(self._texts) else ""
         self._i += 1
         self.calls.append({"samples": int(len(pcm)), "text": text, "t": t0})
         latency = time.perf_counter() - t0
         if hasattr(self, "last_batch_s"):
             self.last_batch_s = latency
-        return Transcript(text=text, latency_s=latency, meta={"mock": True})
+        return Transcript(text=text, latency_s=latency, meta=self._meta(i))
 
     async def close(self) -> None:
         return None
@@ -89,8 +98,10 @@ class MockStreamingSTT(MockSTT):
 
     name = "mock-streaming-stt"
 
-    def __init__(self, texts: list[str], delay_s: float = 0.3, commit_delay_s: float = 0.1) -> None:
-        super().__init__(texts, delay_s)
+    def __init__(
+        self, texts: list[str], delay_s: float = 0.3, commit_delay_s: float = 0.1, *, heard_as: list[str | None] | None = None
+    ) -> None:
+        super().__init__(texts, delay_s, heard_as=heard_as)
         self.commit_delay_s = commit_delay_s
         self.feeds = 0
         self.segment_samples = 0
@@ -117,10 +128,11 @@ class MockStreamingSTT(MockSTT):
         except asyncio.CancelledError:
             self.commit_cancelled.append(time.perf_counter())
             raise
-        text = self._texts[self._i] if self._i < len(self._texts) else ""
+        i = self._i
+        text = self._texts[i] if i < len(self._texts) else ""
         self._i += 1
         self.commits.append({"samples": samples, "text": text, "t": t0})
-        return Transcript(text=text, latency_s=time.perf_counter() - t0, meta={"mock": True, "mode": "stream"})
+        return Transcript(text=text, latency_s=time.perf_counter() - t0, meta=self._meta(i, mode="stream"))
 
     async def discard(self, keep_audio: bool = False) -> None:
         self.discards.append({"samples": self.segment_samples, "keep_audio": keep_audio})
@@ -601,6 +613,7 @@ def mock_agent(
     fillers: list[str] | None = None,
     max_turns: int | None = None,
     pending_events: asyncio.Queue | None = None,
+    languages: list[str] | None = None,
 ) -> Any:
     from .pipeline import VoiceAgent
 
@@ -621,6 +634,7 @@ def mock_agent(
         sanitizer=standin_clean_for_tts,
         tool_executor=standin_execute,
         pending_events=pending_events if pending_events is not None else asyncio.Queue(),
+        languages=languages,
     )
 
 

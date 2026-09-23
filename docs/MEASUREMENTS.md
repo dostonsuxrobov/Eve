@@ -109,6 +109,55 @@ network message on its own (a click ~12x/s at the boundaries), and the writer ap
 inside one chunk dipped below half level; fixed: 0). Lesson recorded in the test suite:
 `y_continuous_audio_inside_a_chunk` and `test_web_page_scripts_parse`.
 
+## Voice: v3 Conversational (2026-09-23)
+
+`eleven_v3_conversational` costs $0.05 / 1k characters against v3's $0.10 (ElevenLabs API
+pricing page, same rate on every plan) and takes the same inline tags. The same four cued lines
+from a live session, same voices, raw (no leveler), one render each:
+
+| model | line | TTFA | audio | voiced | peak | first 10 ms | last 10 ms | pause p50 |
+|---|---|---|---|---|---|---|---|---|
+| v3 | en `[warm]` | 0.62 s | 2.56 s | -13.7 | 0.90 | -68.4 | -52.9 | -54.3 |
+| v3 | en `[amused]` | 0.71 | 4.40 | -17.4 | 0.97 | -81.9 | **-29.5** | -75.3 |
+| v3 | ru `[gentle]` | 0.64 | 5.92 | -23.3 | 0.54 | -56.5 | **-35.4** | -60.3 |
+| v3 | ru `[playful]` | 0.72 | 3.92 | -21.7 | 0.55 | -69.1 | **-24.4** | -56.5 |
+| conversational | en `[warm]` | **0.33** | 2.56 | -20.3 | 0.57 | -80.5 | -30.8 | -66.3 |
+| conversational | en `[amused]` | **0.30** | 3.60 | -16.4 | 1.00 | -87.6 | -83.0 | -54.0 |
+| conversational | ru `[gentle]` | **0.27** | 4.64 | -20.7 | 0.64 | -58.4 | -57.1 | -61.5 |
+| conversational | ru `[playful]` | 0.78 | 3.76 | -20.3 | 0.56 | -77.1 | -61.7 | -56.7 |
+
+So: about 0.35 s sooner to first audio, English and Russian 1.6 dB apart instead of 6.9 (the
+leveler seeds are now -18.4 / -20.5), three of four clip ends clean (v3: none), and about 20 %
+quicker delivery (ru `[gentle]` 4.6 s against 5.9 s): the pace is the listening question. Like v3
+it refuses `optimize_streaming_latency` and `previous_text` (HTTP 400 `unsupported_model`).
+`run.py --once` in Russian after the switch: TTFA 0.30 s, 0.79 s to first audio in text mode
+(v3 on 2026-09-20: 0.67 / 1.38 s). The WAVs are in `samples/out/v3_vs_conversational/`.
+
+## STT language box (2026-09-23)
+
+Live log: Russian and English speech came back from Scribe as Dutch ("Nee, het is niet.",
+"Dat is een groot deal.") and she answered in Dutch. Without `language_code` Scribe realtime picks
+among ~90 languages. Repo samples through the realtime socket, one socket at a time:
+
+* Clean samples (en hello, en task, ru rough day, and 1.0-1.6 s slices): identical and correct
+  in auto, `en` + `secondary_languages=[ru]` and `ru` + `[en]`, including the code-switch.
+* The same speech in 1.2 s windows at 0 dB SNR (17 clips): auto mislabelled "...call my mom
+  later" as `ja` ("You call my mom later。") and returned nothing for "Can you set a timer for
+  five-"; both boxes got them right ("I'll call my mum later.", "Can you set a timer for five-"),
+  and `en`-first and `ru`-first gave the same results. Noise-only tails still came back `mk` "Да."
+  in every mode: the box is a bias, not a wall.
+* `secondary_languages=zz` is refused with the list of valid codes, so the parameter is parsed.
+  An array is the repeated query key; `session_started` echoes it.
+* With `include_language_detection=true` Scribe sends `committed_transcript_with_timestamps`
+  (with `language_code`, no words) *before* `committed_transcript`, so the label costs no wait.
+  Commits with the box and detection on, samples fed at mic pace: 0.12-0.21 s, the same as before.
+
+Hence: the realtime STT is boxed into the session's languages in auto mode, the pipeline never
+switches her language on a label outside them (`stt_foreign` dim line, test
+`z_foreign_language_label_keeps_language`), and the bilingual persona rule says a line in another
+language is a mishearing. `--once "Dat is een groot deal."` after the rule: "Hmm, didn't quite
+catch that. What did you mean?" (before: "Mm, groot is het. Maar ik ben er toch").
+
 ## The `maya` stack after the 2026-09-19 fixes
 
 Two-utterance simulator run (`samples/user_hello.wav`, `samples/user_ru_rough_day.wav`,
@@ -187,9 +236,12 @@ exchanges. Cerebras reports 2,048 of the prompt tokens as cached from the second
 still count as prompt tokens. Ending a session adds one summariser call.
 
 ElevenLabs: one Scribe request per utterance (a realtime commit, or a batch upload on the
-fallback and batch presets) and one Flash request per spoken sentence chunk (typically one to
-three per reply; the persona's fillers are synthesized once per session). Ollama and
-Kokoro presets cost nothing.
+fallback and batch presets) and one v3 Conversational request per spoken sentence chunk
+(typically one to three per reply; the persona's fillers are synthesized once per session).
+Ollama and Kokoro presets cost nothing. Prices on 2026-09-23: Scribe realtime $0.39 per hour
+of audio; v3 $0.10 and v3 Conversational $0.05 per 1k characters. The ~$4.50 per hour estimate
+(80 % voice) was on v3, i.e. roughly 33k characters per hour; on v3 Conversational the same
+hour is about $2.85 (estimated from the price, not a measured session).
 
 ## Known issues
 

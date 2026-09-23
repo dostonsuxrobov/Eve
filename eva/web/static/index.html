@@ -207,6 +207,7 @@
       case "stt_phantom": line("dim", "(ignored as noise)"); break;
       case "utterance_carried": line("dim", "(holding that, go on...)"); break;
       case "language": line("dim", "(switching to " + d.lang + ")"); break;
+      case "stt_foreign": line("dim", "(heard as " + d.lang + ": probably misheard, staying in " + d.kept + ")"); break;
       case "tool_call": line("dim", "tool: " + d.name + " " + JSON.stringify(d.arguments)); break;
       case "failover": line("warn", d.kind + ": " + d.from + " not answering, using " + d.to); break;
       case "recovered": line("dim", d.kind + ": " + d.name + " is back"); break;

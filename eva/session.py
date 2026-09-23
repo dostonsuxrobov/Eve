@@ -76,6 +76,12 @@ def build_session(
     stt_overrides: dict[str, Any] = {}
     if plan.stt_language_code and preset.stt["kind"].startswith("elevenlabs"):
         stt_overrides["language"] = plan.stt_language_code
+    if preset.stt["kind"] == "elevenlabs-realtime":
+        # the batch endpoint's multi-language support is unverified: only realtime is boxed
+        primary, secondary = plan.stt_box
+        if primary and secondary:
+            stt_overrides.update(language=primary, secondary_languages=secondary)
+        stt_overrides["language_detection"] = True
     tts_overrides: dict[str, Any] = {}
     if preset.tts["kind"] == "elevenlabs":
         tts_overrides = {"voice": plan.voice, "voices_by_lang": plan.voices_by_lang}
@@ -102,6 +108,7 @@ def build_session(
         tool_notes=tool_notes(tools),
         delivery_cues=bool(getattr(stack.tts, "supports_cues", False)),
         locked_language=plan.primary.name if plan.locked else None,
+        languages=[lang.name for lang in plan.active],
     )
     fillers = plan.by_lang("fillers")
     hints = plan.by_lang("tool_hints")

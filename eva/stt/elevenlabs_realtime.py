@@ -38,6 +38,14 @@ Measured server quirks handled here:
     idle; measured to keep a session alive for 40 s with the commit still correct.
     Should the server close an idle session anyway, a replacement is pre-opened
     immediately so the next ``feed()`` never pays the handshake.
+  * Without ``language_code`` the server picks from ~90 languages; on noisy 1.2 s
+    fragments it labelled English as ``ja`` and silence tails as ``mk`` (2026-09-23).
+    ``language_code`` + ``secondary_languages`` (en + [ru] or ru + [en], same results)
+    boxes it in: the ``ja`` case came back as English, clean speech was unchanged. It is
+    a bias, not a wall (a ``mk`` label survived), so ``language_detection`` reports the
+    label (``meta["language"]``) and the pipeline refuses to switch on a foreign one.
+    With detection on, ``committed_transcript_with_timestamps`` (``language_code``, no
+    words) arrives before ``committed_transcript``.
   * Never two Scribe requests at once.  A batch request sent while a realtime
     commit was still being served made both crawl (4 / 31 / 7.5 s per turn,
     ``bench/out/e2e_cloud-fast_race.json``; the account's concurrency limit).  One
@@ -53,7 +61,7 @@ import base64
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 from urllib.parse import urlencode
 
@@ -108,8 +116,10 @@ class RealtimeSession:
         commit_timeout_s: float,
         keepalive_s: float = 8.0,
         on_closed: Callable[["RealtimeSession"], None] | None = None,
+        language_detection: bool = False,
     ) -> None:
         self._ws = ws
+        self._language_detection = language_detection
         self._keepalive_s = keepalive_s
         self._on_closed = on_closed
         self._last_send_t = time.perf_counter()
@@ -239,6 +249,7 @@ class RealtimeSession:
                 self._commits.get_nowait()
             self._ts_event.clear()
             self._last_words = []
+            self._last_language = None
             t0 = time.perf_counter()
             min_samples = int(MIN_COMMIT_AUDIO_S * self.sample_rate)
             if self.fed_since_commit < min_samples:
@@ -264,8 +275,9 @@ class RealtimeSession:
             }
             if item.get("soft_error"):
                 meta["soft_error"] = item["soft_error"]
-            if self._include_timestamps and item.get("text"):
-                # The timestamps message follows within ~20 ms; wait briefly, never block a turn.
+            if (self._include_timestamps or self._language_detection) and item.get("text"):
+                # The timestamps message follows within ~20 ms (with language detection on it
+                # carries language_code and arrives first); wait briefly, never block a turn.
                 try:
                     await asyncio.wait_for(self._ts_event.wait(), timeout=0.3)
                 except asyncio.TimeoutError:
@@ -303,6 +315,11 @@ class ElevenLabsRealtimeSTT:
         api_key: ElevenLabs API key.
         model_id: ``scribe_v2_realtime`` (the only realtime model advertised).
         language: optional ``language_code`` query param.
+        secondary_languages: other languages the speaker uses (``secondary_languages``);
+            with ``language`` they box the recogniser into that set (see module doc).
+            The batch fallback is only pinned to ``language`` when there are none.
+        language_detection: request ``include_language_detection``; the detected code
+            is returned as ``meta["language"]``.
         chunk_ms: audio chunk per websocket message (100 ms measured best for bursts).
         include_timestamps: also request ``committed_transcript_with_timestamps``.
         rotate_sessions: open a fresh websocket after every commit (in the background)
@@ -322,6 +339,8 @@ class ElevenLabsRealtimeSTT:
         model_id: str = "scribe_v2_realtime",
         language: str | None = None,
         *,
+        secondary_languages: Sequence[str] = (),
+        language_detection: bool = False,
         chunk_ms: int = 100,
         include_timestamps: bool = False,
         rotate_sessions: bool = True,
@@ -339,6 +358,8 @@ class ElevenLabsRealtimeSTT:
         self.api_key = api_key
         self.model_id = model_id
         self.language = language
+        self.secondary_languages = [c for c in secondary_languages if c and c != language]
+        self.language_detection = language_detection
         self.chunk_ms = chunk_ms
         self.include_timestamps = include_timestamps
         self.rotate_sessions = rotate_sessions
@@ -367,14 +388,18 @@ class ElevenLabsRealtimeSTT:
 
     # ---------------------------------------------------------------- session
     def _url(self, sample_rate: int) -> str:
-        params: dict[str, Any] = {
-            "model_id": self.model_id,
-            "audio_format": f"pcm_{sample_rate}",
-            "commit_strategy": "manual",
-            "include_timestamps": "true" if self.include_timestamps else "false",
-        }
+        params: list[tuple[str, str]] = [
+            ("model_id", self.model_id),
+            ("audio_format", f"pcm_{sample_rate}"),
+            ("commit_strategy", "manual"),
+            ("include_timestamps", "true" if self.include_timestamps else "false"),
+        ]
+        if self.language_detection:
+            params.append(("include_language_detection", "true"))
         if self.language:
-            params["language_code"] = self.language
+            params.append(("language_code", self.language))
+            # an array is the repeated key (verified: session_started echoes ["ru"])
+            params += [("secondary_languages", c) for c in self.secondary_languages]
         return f"{REALTIME_URL}?{urlencode(params)}"
 
     async def open_session(self, sample_rate: int = MIC_SAMPLE_RATE) -> RealtimeSession:
@@ -405,6 +430,7 @@ class ElevenLabsRealtimeSTT:
             sample_rate=sample_rate,
             chunk_ms=self.chunk_ms,
             include_timestamps=self.include_timestamps,
+            language_detection=self.language_detection,
             on_partial=self._forward_partial,  # reads self.on_partial at call time: the pipeline sets it after warmup
             commit_timeout_s=self.commit_timeout_s,
             keepalive_s=self.keepalive_s,
@@ -625,7 +651,9 @@ class ElevenLabsRealtimeSTT:
     async def _batch(self, pcm: np.ndarray, sample_rate: int | None = None) -> Transcript:
         """One batch request (caller holds ``_api_lock``); retired sockets are closed first."""
         if self._fallback is None:
-            self._fallback = ElevenLabsScribeSTT(self.api_key, model_id="scribe_v2", language=self.language)
+            # a boxed session (language + secondaries) must not pin the batch call to one language
+            pinned = self.language if not self.secondary_languages else None
+            self._fallback = ElevenLabsScribeSTT(self.api_key, model_id="scribe_v2", language=pinned)
         await self._await_closing()
         t0 = time.perf_counter()
         tr = await self._fallback.transcribe(pcm, sample_rate or self.sample_rate)
