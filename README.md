@@ -33,14 +33,15 @@ are when the mic's echo canceller is still converging. `--no-greeting`, `--mute-
 
 | preset | STT | brain | TTS |
 |---|---|---|---|
-| `maya` (default) | ElevenLabs Scribe v2 realtime (streams while you talk) | Cerebras `qwen-3.8-27b`, reasoning low | ElevenLabs v3 Conversational for every sentence, one delivery cue per reply; `eva_en` / `eva_ru` voices |
+| `maya` (default) | ElevenLabs Scribe v2 realtime (streams while you talk) | Cerebras `qwen-3.8-27b`, reasoning low | ElevenLabs v3 for every sentence, one delivery cue per reply; `eva_en` voice |
+| `maya-lite` | same as `maya` | same as `maya` | ElevenLabs v3 Conversational: half the voice price, 0.35 s sooner, flatter so far (A/B) |
 | `local` | Parakeet TDT 0.6B int8 (sherpa-onnx) | Ollama `qwen3:8b`, thinking off | Kokoro (ONNX, CPU) |
 
 The brain is qwen-3.8-27b on Cerebras: 6.2/10 in the eval, 6/6 on tool calls, 0.30 s to the
 first token, about $0.003 per exchange ($0.99 / $1.49 per M tokens in / out, 2026-09-19). An
 exchange is 2,800-4,300 prompt tokens and 40-150 output tokens, so an hour of talking (about
 270 exchanges) is roughly $0.95 of brain; ElevenLabs (Scribe per minute of audio, v3 / Flash per
-character: $0.05 per 1k on v3 Conversational) costs more per hour than that. Every other brain measured, cloud and local, is in
+character: $0.10 per 1k on v3, $0.05 on v3 Conversational) costs more per hour than that. Every other brain measured, cloud and local, is in
 `docs/EVAL_REPORT.md` (sections 3 and 10) and in git history; the live comparison on
 2026-09-19 settled it ("much more natural by much larger margins").
 

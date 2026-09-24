@@ -133,6 +133,10 @@ it refuses `optimize_streaming_latency` and `previous_text` (HTTP 400 `unsupport
 `run.py --once` in Russian after the switch: TTFA 0.30 s, 0.79 s to first audio in text mode
 (v3 on 2026-09-20: 0.67 / 1.38 s). The WAVs are in `samples/out/v3_vs_conversational/`.
 
+The owner's first live listen on Conversational: "feels flat". Both now ship: `maya` (v3, the
+default again) and `maya-lite` (Conversational) for a live A/B; the numbers above say nothing
+about expressiveness, which is the owner's call.
+
 ## STT language box (2026-09-23)
 
 Live log: Russian and English speech came back from Scribe as Dutch ("Nee, het is niet.",
@@ -236,12 +240,12 @@ exchanges. Cerebras reports 2,048 of the prompt tokens as cached from the second
 still count as prompt tokens. Ending a session adds one summariser call.
 
 ElevenLabs: one Scribe request per utterance (a realtime commit, or a batch upload on the
-fallback and batch presets) and one v3 Conversational request per spoken sentence chunk
+fallback and batch presets) and one v3 (or v3 Conversational on `maya-lite`) request per spoken sentence chunk
 (typically one to three per reply; the persona's fillers are synthesized once per session).
 Ollama and Kokoro presets cost nothing. Prices on 2026-09-23: Scribe realtime $0.39 per hour
 of audio; v3 $0.10 and v3 Conversational $0.05 per 1k characters. The ~$4.50 per hour estimate
-(80 % voice) was on v3, i.e. roughly 33k characters per hour; on v3 Conversational the same
-hour is about $2.85 (estimated from the price, not a measured session).
+(80 % voice) is on v3 (`maya`), i.e. roughly 33k characters per hour; on v3 Conversational
+(`maya-lite`) the same hour is about $2.85 (estimated from the price, not a measured session).
 
 ## Known issues
 

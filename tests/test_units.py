@@ -61,6 +61,20 @@ def test_default_session_is_english_only() -> None:
     assert run.parse_args([]).lang == "en"
 
 
+def test_two_voice_presets() -> None:
+    """The live A/B (2026-09-23): maya on v3, maya-lite on v3 Conversational, nothing else different."""
+    from dataclasses import replace
+
+    from eva.config import DEFAULT_PRESET, PRESETS
+
+    full, lite = PRESETS["maya"], PRESETS["maya-lite"]
+    assert DEFAULT_PRESET == "maya"
+    assert full.tts["model_id"] == "eleven_v3" and lite.tts["model_id"] == "eleven_v3_conversational"
+    assert "ElevenLabs v3 on" in full.description and "v3 Conversational" in lite.description
+    same = {**lite.tts, "model_id": full.tts["model_id"]}
+    assert same == full.tts and replace(lite, name="maya", description="", tts=full.tts) == replace(full, description="")
+
+
 def test_scribe_realtime_language_box() -> None:
     from urllib.parse import parse_qs, urlsplit
 

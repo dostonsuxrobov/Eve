@@ -161,12 +161,18 @@ LOCAL_STT: dict[str, Any] = {"kind": "parakeet"}
 LOCAL_TTS: dict[str, Any] = {"kind": "kokoro", "voice": "af_heart"}
 
 _MAYA_STT: dict[str, Any] = {"kind": "elevenlabs-realtime", "model_id": "scribe_v2_realtime"}
+# The two voices under test (2026-09-23): the owner heard v3 Conversational as flat, so both
+# ship as presets and the live A/B decides. Same voice, cues, leveling and pipeline; only the model.
+VOICE_MODELS: dict[str, dict[str, str]] = {
+    # $0.10 / 1k chars; 0.62-0.72 s to first audio; the voice the owner approved on 2026-09-19
+    "v3": {"model_id": "eleven_v3", "label": "ElevenLabs v3"},
+    # $0.05 / 1k chars; 0.27-0.33 s to first audio; ~20 % quicker pace; "feels flat" (owner, first listen)
+    "conversational": {"model_id": "eleven_v3_conversational", "label": "ElevenLabs v3 Conversational"},
+}
 _MAYA_TTS: dict[str, Any] = {
     "kind": "elevenlabs",
     "voice": "eva_en",  # per-language voices come from eva/assets/lang/*.toml
-    # v3 Conversational: $0.05 / 1k chars against v3's $0.10, same audio tags, and 0.27-0.33 s to
-    # first audio against v3's 0.62-0.72 (2026-09-23, docs/MEASUREMENTS.md). "eleven_v3" switches back.
-    "model_id": "eleven_v3_conversational",
+    "model_id": VOICE_MODELS["v3"]["model_id"],  # per preset, see PRESETS
     # One model for every chunk. The Flash first chunk (0.2 s to first audio against v3's 0.5-0.9) put
     # a different timbre, pace and noise floor on the first sentence of every reply: "rushed
     # start, then it settles". Set "first_chunk_model": "eleven_flash_v2_5" to trade back.
@@ -178,20 +184,21 @@ _MAYA_SETTINGS = PipelineSettings(
     first_chunk_min_chars=40, min_chunk_chars=20,
 )
 _MAYA_EARS_AND_VOICE = (
-    "Scribe realtime STT, ElevenLabs v3 Conversational on the eva_en voice with one delivery cue per reply, "
+    "Scribe realtime STT, {voice} on the eva_en voice with one delivery cue per reply, "
     "backchannels (headphones). Falls back to Parakeet / Ollama qwen3:8b / Kokoro when a cloud service "
     "stops answering."
 )
 
 
-def _maya(name: str, brain: str, blurb: str) -> Preset:
-    """The Maya stack with one of the three brains; same ears and voice, so what differs is the brain."""
+def _maya(name: str, brain: str, blurb: str, voice: str = "v3") -> Preset:
+    """The Maya stack with a brain and one of the VOICE_MODELS; everything else is shared."""
+    vm = VOICE_MODELS[voice]
     return Preset(
         name=name,
-        description=f"{blurb} {_MAYA_EARS_AND_VOICE}",
+        description=f"{blurb} {_MAYA_EARS_AND_VOICE.format(voice=vm['label'])}",
         stt=dict(_MAYA_STT),
         llm=dict(BRAINS[brain]),
-        tts=dict(_MAYA_TTS),
+        tts={**_MAYA_TTS, "model_id": vm["model_id"]},
         settings=_MAYA_SETTINGS,
         stt_fallback=dict(LOCAL_STT),
         llm_fallback=dict(BRAINS["local"]),
@@ -202,6 +209,10 @@ def _maya(name: str, brain: str, blurb: str) -> Preset:
 # The agent, plus the fully offline stack (the same providers the agent falls back to).
 PRESETS: dict[str, Preset] = {
     "maya": _maya("maya", "qwen", "Brain: Cerebras qwen-3.8-27b (6.2/10, 0.30 s to first token, about $0.003 per exchange)."),
+    # the same stack on the cheaper voice: half the voice price, 0.35 s sooner, flatter so far
+    "maya-lite": _maya(
+        "maya-lite", "qwen", "Brain: Cerebras qwen-3.8-27b. Voice at half price.", voice="conversational"
+    ),
     "local": Preset(
         name="local",
         description=(

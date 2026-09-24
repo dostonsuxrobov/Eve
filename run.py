@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Eva CLI - talk to the voice agent.
 
-    .venv/Scripts/python.exe run.py --user-name Doston            # the cloud stack (preset maya), English
+    .venv/Scripts/python.exe run.py --user-name Doston            # the cloud stack (preset maya: v3 voice), English
+    .venv/Scripts/python.exe run.py --preset maya-lite            # the same on v3 Conversational (half the voice price)
     .venv/Scripts/python.exe run.py --preset local                # everything on this laptop
     .venv/Scripts/python.exe run.py --web --tls                   # talk from your phone: https://<laptop-ip>:8443
     .venv/Scripts/python.exe run.py --list-devices

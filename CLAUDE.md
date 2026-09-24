@@ -22,18 +22,18 @@ every judgement about what is *true*.
 ## Current state (2026-09-23)
 
 * Stack `maya`: ElevenLabs Scribe v2 realtime (STT, language hint `en`) → Cerebras
-  `qwen-3.8-27b` (brain, reasoning low) → ElevenLabs v3 Conversational (voice, one delivery cue
-  per reply, `eva_en` voice).
+  `qwen-3.8-27b` (brain, reasoning low) → ElevenLabs v3 (voice, one delivery cue per reply,
+  `eva_en` voice). `--preset maya-lite` is the same stack on v3 Conversational (under live A/B).
   Falls back per provider to the local stack (Parakeet / Ollama `qwen3:8b` / Kokoro) when a
   cloud service stops answering (`eva/failover.py`). Preset `local` is that stack offline.
 * Runs from the laptop (`run.py`) or from a phone in the browser (`run.py --web --tls`,
   `eva/web/`). Language: English only by default (`lang.DEFAULT_MODE = "en"`); Russian is frozen
   but intact (`--lang auto|ru`, data under `eva/assets/`).
-* Measured: ~1.0–1.5 s from the user's last word to her first (before the v3 Conversational
-  switch, which took ~0.35 s off first audio); 6.2/10 in the conversation eval; 6/6 on the
-  tool-calling probe; ~$4.50 per hour on v3, ~$2.85 estimated on v3 Conversational (half the
-  voice price; the voice is most of the bill).
-* 48 offline tests (`pytest tests`), a real-audio simulator and a conversation eval in `bench/`.
+* Measured: ~1.0–1.5 s from the user's last word to her first on v3 (v3 Conversational is
+  ~0.35 s sooner to first audio); 6.2/10 in the conversation eval; 6/6 on the tool-calling
+  probe; ~$4.50 per hour on v3, ~$2.85 estimated on v3 Conversational (half the voice price;
+  the voice is most of the bill).
+* 49 offline tests (`pytest tests`), a real-audio simulator and a conversation eval in `bench/`.
 
 ## English first (owner's decision, 2026-09-23)
 
@@ -59,7 +59,7 @@ fresh measurements.
   |---|---|---|
   | last word → her first audio, median over a real session | ~1.0–1.5 s (before v3 Conv.'s −0.35 s) | ≤ 0.8 s |
   | conversation eval (`bench/conversation_eval.py`) | 6.2 / 10 | ≥ 7.5 |
-  | cost per hour, measured from a real session | ~$2.85 estimated | ≤ $1.50 |
+  | cost per hour, measured from a real session | ~$4.50 (v3) / ~$2.85 (Conv.), estimated | ≤ $1.50 |
   | emotion: blind listening test (owner judges) | not measured yet | she wins or ties the best alternative |
   | stability: daily use with no new audio bug | — | 2 weeks |
 
@@ -100,10 +100,12 @@ line saying why. Keep that: it is how bugs get reported.
   and gpt-5.6-luna 7.7 but OpenAI is not the brain (owner's constraint: open models). The
   live comparison settled it: "much more natural by much larger margins". `qwen3:8b` is the
   first local model that calls tools correctly (6/6) and is the fallback brain.
-* **Voice: one model for every sentence, v3 Conversational.** A Flash first chunk was 0.4 s
-  faster but a different timbre, pace and noise floor on the first sentence of every reply.
-  v3 Conversational (2026-09-23) is half v3's price, 0.35 s sooner to first audio, same tags,
-  cleaner clip ends, ~20 % quicker pace; `"model_id": "eleven_v3"` in `config.py` switches back.
+* **Voice: one model for every sentence; v3 by default, v3 Conversational under A/B.** A Flash
+  first chunk was 0.4 s faster but a different timbre, pace and noise floor on the first sentence
+  of every reply. v3 Conversational (2026-09-23) is half v3's price, 0.35 s sooner, same tags,
+  cleaner clip ends, ~20 % quicker pace, but the owner's first listen: "feels flat". So `maya`
+  stays on v3 and `maya-lite` runs Conversational (`config.VOICE_MODELS`) until the live A/B
+  decides; feel beats price.
   One delivery cue per reply, inherited by every chunk: a voice does not change colour every sentence.
 * **Edges:** v3 clips are trimmed hot (first 10 ms −39 dBFS, last 10 ms −31); 120/280 ms
   reply fades, 40 ms fades and a 220 ms pause at chunk boundaries only. Room tone is off
@@ -146,8 +148,8 @@ line saying why. Keep that: it is how bugs get reported.
    reply). Try an English turn-taking STT (Deepgram Flux) against Scribe + our own predictor.
 2. **Emotion, measured** (emotion gate): a blind listening set (the same lines and cues across
    voices) and emotion scenarios in the conversation eval, so "sounds real" becomes a number.
-3. **Voice provider** (cost + emotion gates): blind English test of v3 Conversational vs
-   Inworld TTS-2 (~$5–25 / M chars) vs Cartesia; log characters sent vs heard (lookahead chunks
+3. **Voice provider** (cost + emotion gates): the live `maya` (v3) vs `maya-lite` (v3
+   Conversational) A/B first, then a blind English test of the winner vs Inworld TTS-2 (~$5–25 / M chars) vs Cartesia; log characters sent vs heard (lookahead chunks
    billed on barge-in). Decide *before* item 4: a designed voice ties her to a provider.
 4. **Her own voice**: a designed / cloned English voice on the chosen provider.
 5. **Episodic memory**: what happened last time, moods over days, not a flat fact list.
