@@ -71,7 +71,8 @@ script-agnostic; everything that differs is data under `eva/assets/`.
   The Microsoft Store Python cannot open the microphone (packaged app without the capability),
   so never build the venv on it. Run with `.venv/Scripts/python.exe`.
   Set `PYTHONIOENCODING=utf-8` when printing model output (cp1252 console).
-* GPU: RTX 4050 laptop, 6 GB. Ollama holds ~5.7 GB with qwen3:8b loaded (27 % of it on the CPU).
+* GPU: RTX 4050 laptop, 6 GB. The local brain is qwen3:4b-instruct-2507 (2.5 GB on disk); the
+  qwen3:8b it replaced (2026-09-25) held ~5.7 GB with 27 % of it on the CPU.
   onnxruntime is CPU-only in the venv (fine for VAD, Kokoro, Parakeet int8).
 * Ollama MUST be reached at `http://127.0.0.1:11434`, never `localhost` (+2 s per call).
 * Cerebras MUST get a custom `User-Agent` header or Cloudflare returns 403 / error 1010.

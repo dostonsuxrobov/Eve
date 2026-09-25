@@ -35,7 +35,7 @@ are when the mic's echo canceller is still converging. `--no-greeting`, `--mute-
 |---|---|---|---|
 | `maya` (default) | ElevenLabs Scribe v2 realtime (streams while you talk) | Cerebras `qwen-3.8-27b`, reasoning low | ElevenLabs v3 for every sentence, one delivery cue per reply; `eva_en` voice |
 | `maya-lite` | same as `maya` | same as `maya` | ElevenLabs v3 Conversational: half the voice price, 0.35 s sooner, flatter so far (A/B) |
-| `local` | Parakeet TDT 0.6B int8 (sherpa-onnx) | Ollama `qwen3:8b`, thinking off | Kokoro (ONNX, CPU) |
+| `local` | Parakeet TDT 0.6B int8 (sherpa-onnx) | Ollama `qwen3:4b-instruct-2507-q4_K_M` | Kokoro (ONNX, CPU) |
 
 The brain is qwen-3.8-27b on Cerebras: 6.2/10 in the eval, 6/6 on tool calls, 0.30 s to the
 first token, about $0.003 per exchange ($0.99 / $1.49 per M tokens in / out, 2026-09-19). An
@@ -157,7 +157,7 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 Do not build the venv on the Microsoft Store Python (`AppData\Local\Microsoft\WindowsApps`):
 Windows denies audio capture to that packaged app. Keys: `cerebras_api_key.txt` and
 `elevenlabs_key.txt` in the project root (or `CEREBRAS_API_KEY` / `ELEVENLABS_API_KEY`); gitignored.
-Ollama must be running with `qwen3:8b` pulled for the `local` preset and
+Ollama must be running with `qwen3:4b-instruct-2507-q4_K_M` pulled for the `local` preset and
 the fallback brain. Models for Parakeet, Kokoro and the Silero VAD live under `models/`.
 
 ## Tests and benches

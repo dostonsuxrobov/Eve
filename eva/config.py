@@ -151,8 +151,9 @@ class Preset:
 BRAINS: dict[str, dict[str, Any]] = {
     # 6.2/10, 6/6 tools, 0.30 s TTFT, about $0.003 per exchange ($0.99 / $1.49 per M tokens)
     "qwen": {"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800},
-    # qwen3:8b: 3.7/10 as a companion but 6/6 on tool calls; the fallback brain and the offline preset
-    "local": {"kind": "ollama", "model": "qwen3:8b"},
+    # qwen3:4b-instruct-2507 (owner's choice 2026-09-25, replaces qwen3:8b: 3.7/10, 6/6 tools, 5.7 GB of
+    # the 6 GB GPU): 2.0/10 as a companion, 2.5 GB. The fallback brain and the offline preset
+    "local": {"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M"},
 }
 DEFAULT_BRAIN = "qwen"
 
@@ -185,7 +186,7 @@ _MAYA_SETTINGS = PipelineSettings(
 )
 _MAYA_EARS_AND_VOICE = (
     "Scribe realtime STT, {voice} on the eva_en voice with one delivery cue per reply, "
-    "backchannels (headphones). Falls back to Parakeet / Ollama qwen3:8b / Kokoro when a cloud service "
+    "backchannels (headphones). Falls back to Parakeet / Ollama qwen3:4b-instruct / Kokoro when a cloud service "
     "stops answering."
 )
 
@@ -216,8 +217,8 @@ PRESETS: dict[str, Preset] = {
     "local": Preset(
         name="local",
         description=(
-            "Everything on this laptop: Parakeet TDT 0.6B (sherpa-onnx) STT, Ollama qwen3:8b, "
-            "Kokoro TTS. Free, private, offline; tools work, the conversation is 3.7/10 (docs/EVAL_REPORT.md)."
+            "Everything on this laptop: Parakeet TDT 0.6B (sherpa-onnx) STT, Ollama qwen3:4b-instruct, "
+            "Kokoro TTS. Free, private, offline; the conversation is 2.0/10 (docs/EVAL_REPORT.md)."
         ),
         stt=dict(LOCAL_STT),
         llm=dict(BRAINS["local"]),

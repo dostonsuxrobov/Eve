@@ -24,7 +24,7 @@ every judgement about what is *true*.
 * Stack `maya`: ElevenLabs Scribe v2 realtime (STT, language hint `en`) → Cerebras
   `qwen-3.8-27b` (brain, reasoning low) → ElevenLabs v3 (voice, one delivery cue per reply,
   `eva_en` voice). `--preset maya-lite` is the same stack on v3 Conversational (under live A/B).
-  Falls back per provider to the local stack (Parakeet / Ollama `qwen3:8b` / Kokoro) when a
+  Falls back per provider to the local stack (Parakeet / Ollama `qwen3:4b-instruct-2507` / Kokoro) when a
   cloud service stops answering (`eva/failover.py`). Preset `local` is that stack offline.
 * Runs from the laptop (`run.py`) or from a phone in the browser (`run.py --web --tls`,
   `eva/web/`). Language: English only by default (`lang.DEFAULT_MODE = "en"`); Russian is frozen
@@ -99,7 +99,9 @@ line saying why. Keep that: it is how bugs get reported.
   JSON), local qwen3:4b 2.0, qwen2.5-coder:7b 2.3, gpt-5.4-nano 6.0; gpt-5.4-mini scored 8.0
   and gpt-5.6-luna 7.7 but OpenAI is not the brain (owner's constraint: open models). The
   live comparison settled it: "much more natural by much larger margins". `qwen3:8b` is the
-  first local model that calls tools correctly (6/6) and is the fallback brain.
+  first local model that calls tools correctly (6/6), but the owner switched the fallback brain
+  to `qwen3:4b-instruct-2507` on 2026-09-25 and deleted the 8B: 3/6 on tools (it *says* "setting
+  that timer" without calling it), 2.0/10, 2.5 GB instead of ~5.7 GB on the 6 GB GPU.
 * **Voice: one model for every sentence; v3 by default, v3 Conversational under A/B.** A Flash
   first chunk was 0.4 s faster but a different timbre, pace and noise floor on the first sentence
   of every reply. v3 Conversational (2026-09-23) is half v3's price, 0.35 s sooner, same tags,

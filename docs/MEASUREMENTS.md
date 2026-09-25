@@ -109,6 +109,17 @@ network message on its own (a click ~12x/s at the boundaries), and the writer ap
 inside one chunk dipped below half level; fixed: 0). Lesson recorded in the test suite:
 `y_continuous_audio_inside_a_chunk` and `test_web_page_scripts_parse`.
 
+## Local brain: qwen3:4b-instruct-2507 replaces qwen3:8b (2026-09-25)
+
+Owner's decision: the fallback brain and the `local` preset run Ollama
+`qwen3:4b-instruct-2507-q4_K_M` (2.5 GB); `qwen3:8b` (5.2 GB, ~5.7 GB loaded, 27 % on the CPU)
+was deleted from Ollama. The instruct build accepts `think: false` on `/api/chat`.
+`bench/tool_probe.py --brain local` on the new model: **3/6** (was 6/6 on the 8B), the same as
+EVAL_REPORT section 10. It passes time and both no-tool turns; it fails timer + note, weather and
+goodbye by *saying* the action ("One sec, setting that timer", "checking weather for
+Philadelphia") with no tool call. TTFT median 0.36 s warm (the 8B: 0.18 s bare, 1.3 s with
+tools); the first case paid a 7.2 s cold load. Companion score on record: 2.0/10 (8B: 3.7).
+
 ## Voice: v3 Conversational (2026-09-23)
 
 `eleven_v3_conversational` costs $0.05 / 1k characters against v3's $0.10 (ElevenLabs API
