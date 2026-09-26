@@ -5,12 +5,13 @@ __pycache__/
 *.key
 .env
 models/
-samples/out/
-bench/out/
+**/samples/out/
+**/bench/out/
+.pytest_cache/
 memory.json
 notes.json
 *.wav
 *.mp3
-!samples/*.wav
+!**/samples/*.wav
 openAI_api.txt
 *api*.txt
