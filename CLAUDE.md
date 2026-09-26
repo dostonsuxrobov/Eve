@@ -27,6 +27,10 @@ memory), fine-tuning on our own data, careful audio. Not from a bigger model or 
   (`eva/toolgate.py`: only the tools the user's words point at). Voices: Kokoro (CPU), Orpheus 3B
   (5 voices), Chatterbox Turbo and Chatterbox (cloning `eva/assets/voices/eva.wav`, an Orpheus
   "tara" render).
+* **One cloud brain, for comparison (owner, 2026-09-26):** `qwen27b` is the cloud era's Cerebras
+  qwen-3.8-27b (`eva/llm/openai_compat.py`, key in the gitignored `cerebras_api_key.txt`), so the
+  owner can hear what the brain alone changes with the same voice. It is a test, not the direction:
+  the default stays local, and its quota is small (no benchmarks on it).
 * **The voice server:** voices that need PyTorch run in `.venv-voice` behind `voice/server.py`
   (stdlib HTTP on 127.0.0.1:8765, one engine on the GPU at a time); `eva/tts/voice_server.py` is
   the loop's side and starts it on demand. It maps Eva's generic sounds (`[laughs]`) to each

@@ -24,6 +24,19 @@ USER_AGENT = "eva-voice-agent/0.2"
 # before falling back. Always use the IPv4 literal.
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 VOICE_SERVER_URL = "http://127.0.0.1:8765"
+# The one cloud brain, for the owner's comparison (2026-09-26): Cerebras sits behind Cloudflare
+# and returns 403 (error 1010) for default python user agents, hence USER_AGENT. The key lives in
+# the gitignored cerebras_api_key.txt (or CEREBRAS_API_KEY); quotas are small, so no benchmarks on it.
+CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+
+
+def cerebras_key() -> str | None:
+    import os
+
+    if os.environ.get("CEREBRAS_API_KEY"):
+        return os.environ["CEREBRAS_API_KEY"].strip()
+    path = ROOT / "cerebras_api_key.txt"
+    return path.read_text(encoding="utf-8").strip() if path.exists() else None
 
 
 @dataclass
@@ -98,6 +111,10 @@ class PipelineSettings:
 BRAINS: dict[str, dict[str, Any]] = {
     "qwen4b": {"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M", "persona": "eva",
                "label": "Qwen3 4B: fewest rule breaks in the bench (7/41); 3.2 GB, 56 tok/s, tools 4/6"},
+    # Cloud, for comparison only (owner, 2026-09-26): the cloud era's brain, 6.2/10 in its eval, 6/6
+    # tools, 0.2-0.4 s to the first token over the network. No VRAM: the voice gets the whole GPU.
+    "qwen27b": {"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800, "persona": "eva",
+                "label": "CLOUD Cerebras qwen-3.8-27b (comparison): the cloud era's brain, no VRAM, uses the API quota"},
     "qwen2b": {"kind": "ollama", "model": "qwen3.5:2b-q4_K_M", "persona": "eva_small", "tool_gate": True,
                "label": "Qwen 3.5 2B: 2.4 GB, 99 tok/s, rambles (51 words), tools 3/6"},
     "minicpm2b": {"kind": "ollama", "model": "openbmb/minicpm5-2b", "persona": "eva_small", "tool_gate": True,

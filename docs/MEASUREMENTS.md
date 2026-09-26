@@ -111,3 +111,29 @@ version: a spoken line keeps its transcript on the turn's metrics).
 
 Ideas not yet tried for Orpheus' speed: prune its output layer to the ~28k audio tokens (most of
 the per-token read), a smaller Orpheus-style model, or llama.cpp's own server with CUDA graphs.
+
+## Live sessions with Chatterbox, and the brain question (2026-09-26)
+
+From `voice/server.log` of the owner's own sessions (one line per sentence she spoke):
+
+| voice | sentences | first audio per sentence, median (min-max) | sentence length, median | x real time, median |
+|---|---|---|---|---|
+| chatterbox (0.5B) | 59 | 2.49 s (1.22-6.99) | 2.2 s | 0.93 |
+| chatterbox-turbo | 25 | 0.70 s (0.40-1.66) | 1.6 s | 2.29 |
+| orpheus | 55 | 1.48 s (0.68-3.05) | 3.2 s | 0.73 |
+
+Chatterbox renders a whole sentence before any of it plays, so a long sentence waits: 6-7 s
+before the three longest. The small brain wrote a mood cue in 4 of 62 sentences, so Chatterbox
+ran at its default emotion strength almost all the time.
+
+What the 1B said that wasn't true, in the owner's sessions: "I'm also working on creating an AI
+agent named Eva", "I have been working on the Skynet project as well". Both are facts about the
+*owner* in `memory.json`, stored without a subject ("Is working on a project called Skynet...");
+the 1B read them as its own. The same file holds facts that are not true (speaks Dutch,
+Portuguese, Ukrainian: likely misheard languages from the cloud era; a sister named Priya: the
+eval's stand-in user). Plus help-desk lines ("I can help with tasks like setting timers...") and
+"I'm glad you asked!" three times.
+
+The cloud 27B on the Chatterbox prompt, one call: first token 0.72 s, opened with `[amused]`, and
+used the memory as the owner's ("Which model did you end up going with, the smaller one or the
+big one?").

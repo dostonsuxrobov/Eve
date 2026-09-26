@@ -53,10 +53,12 @@ def test_default_session_is_english_only() -> None:
 def test_every_brain_and_voice_builds(tmp_path: Path) -> None:
     """Each brain x voice makes a session; the prompt offers exactly what the voice renders,
     and a brain without tools in its Ollama template gets none."""
-    from eva.config import BRAINS, VOICES, make_preset
+    from eva.config import BRAINS, VOICES, cerebras_key, make_preset
     from eva.session import build_session
 
     for brain in BRAINS:
+        if BRAINS[brain]["kind"] == "cerebras" and not cerebras_key():
+            continue  # the cloud comparison brain needs its key; everything else is offline
         for voice in VOICES:
             s = build_session(make_preset(brain, voice), memory_path=tmp_path / "m.json")
             assert s.persona.name == BRAINS[brain].get("persona", "eva")

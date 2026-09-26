@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .config import BRAINS, OLLAMA_BASE_URL, VOICE_SERVER_URL, Preset
+from .config import BRAINS, CEREBRAS_BASE_URL, OLLAMA_BASE_URL, VOICE_SERVER_URL, Preset, cerebras_key
 from .interfaces import LLM, STT, TTS
 
 
@@ -42,6 +42,21 @@ def build_llm(cfg: dict[str, Any]) -> LLM:
             max_tokens=cfg.get("max_tokens", 300),
             temperature=cfg.get("temperature", 0.8),
             options=cfg.get("options"),
+        )
+    if kind == "cerebras":
+        # the cloud era's client (eva/llm/openai_compat.py), for the owner's comparison
+        from .llm.openai_compat import OpenAICompatLLM
+
+        key = cerebras_key()
+        if not key:
+            raise RuntimeError("no Cerebras key: put it in cerebras_api_key.txt or CEREBRAS_API_KEY")
+        model = cfg["model"]
+        reasoning = cfg.get("reasoning")
+        # qwen with reasoning off truncated 25-40 % of very short replies mid-word; "low" didn't (archived eval)
+        extra: dict[str, Any] = {"disable_reasoning": True} if reasoning in (None, "none", "off", False) else {"reasoning_effort": reasoning}
+        return OpenAICompatLLM(
+            name=f"cerebras/{model}", base_url=cfg.get("base_url", CEREBRAS_BASE_URL), api_key=key, model=model,
+            extra_body=extra, max_tokens=cfg.get("max_tokens", 800), temperature=cfg.get("temperature", 0.8),
         )
     raise ValueError(f"unknown llm kind {kind!r}")
 
