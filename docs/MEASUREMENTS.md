@@ -109,6 +109,31 @@ network message on its own (a click ~12x/s at the boundaries), and the writer ap
 inside one chunk dipped below half level; fixed: 0). Lesson recorded in the test suite:
 `y_continuous_audio_inside_a_chunk` and `test_web_page_scripts_parse`.
 
+## Her echo answered as the user (2026-09-25, laptop speakers)
+
+Live session `--preset maya --brain local`, no headphones: three "user" turns were her own
+words back through the mic. Scored with `echo_similarity` against the reply she was speaking:
+
+| she said | transcript | similarity |
+|---|---|---|
+| "You'll probably feel it more when you" | "You'll probably smell bad when you stop asking." | 0.67 |
+| "You're the one with the kitchen—what's in the fridge?" | "We're the ones with the kitchen. What's in the fridge?" | 0.94 |
+| "I don't know, but you said you're making" | "I don't know, but you said you're making Caribbean." | 0.89 |
+
+All three are over the 0.6 echo threshold, but the self-echo gate in `_transcribe` only uses the
+fuzzy rule for an utterance "that began while she was audible", and it read that from
+`_audible_since`, which is already `None` by transcription time (a barge-in or the end of her
+reply clears it). Only the exact-run rule ran (0.8 of the words in one exact run): all three
+failed it. Fix: the last SPEAKING spans are kept and the utterance start is checked against
+them. Test `zb_echo_transcript_after_she_stopped` fails on the old code.
+
+Still open: in two of the three the echo also *interrupted* her before its transcript was
+dropped (no "hearing myself" line, so the echo detector did not flag it); likely the 1.5 s
+`barge_in_words_wait_ms` rule (sustained speech with no partial counts as a person). Now she
+stops instead of answering herself; the next session with `--debug` should show which rule fired.
+Separately, `s_llm_keepalive` fails in the full suite on both old and new code today (passes
+alone, 3/3): a timing-tight test under load, not this change.
+
 ## Local brain: qwen3:4b-instruct-2507 replaces qwen3:8b (2026-09-25)
 
 Owner's decision: the fallback brain and the `local` preset run Ollama

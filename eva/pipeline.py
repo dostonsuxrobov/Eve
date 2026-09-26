@@ -458,6 +458,9 @@ class VoiceAgent:
         self._last_spoken = ""  # what she said last (heard part), for the self-echo gate
         self._last_audio_end: float | None = None
         self._audible_since: float | None = None  # when the current SPEAKING state began
+        # the last few (start, end) SPEAKING spans: a transcript arrives after she stopped, so
+        # "did it begin while she was audible" must be answered from the past, not the state now
+        self._audible_spans: deque[tuple[float, float]] = deque(maxlen=4)
         # barge-in while she is audible: evidence gathered per VAD onset (see _check_barge_in)
         self._partial = ""  # latest partial transcript from the streaming STT for this onset
         self._cand_echo_hits = 0
@@ -1012,7 +1015,7 @@ class VoiceAgent:
         if self.settings.self_echo_gate and self._last_spoken and self._last_audio_end is not None:
             started = turn.metrics.speech_start if turn.metrics.speech_start is not None else turn.started_at
             near = started - self._last_audio_end < ECHO_WINDOW_S
-            during = self._audible_since is not None and started >= self._audible_since - 0.2
+            during = self._began_while_audible(started)
             # fuzzy matching only for an utterance that began while she was playing: after she
             # stopped, a short reply that repeats her words is an answer, not echo
             echo = (during and looks_like_echo(text, self._last_spoken, min_words=2, fuzzy=ECHO_PARTIAL_SIM)) or (
@@ -1024,6 +1027,14 @@ class VoiceAgent:
                 return ""
         self._follow_lang(text, tr.meta.get("language"))
         return text
+
+    def _began_while_audible(self, started: float) -> bool:
+        """True if an utterance that began at ``started`` began while she was playing (now or in
+        one of the last SPEAKING spans). Barge-in ends her turn before the transcript arrives, so
+        the state at transcription time never says she was audible."""
+        if self._audible_since is not None and started >= self._audible_since - 0.2:
+            return True
+        return any(s - 0.2 <= started <= e for s, e in self._audible_spans)
 
     async def _commit_then_batch(self, turn: _Turn) -> Transcript:
         """``stt.commit()`` with a deadline; on timeout or failure ONE batch request follows.
@@ -1678,6 +1689,8 @@ class VoiceAgent:
             self._audible_since = _now()
         elif old is State.SPEAKING:
             self._last_audio_end = _now()
+            if self._audible_since is not None:
+                self._audible_spans.append((self._audible_since, self._last_audio_end))
             self._audible_since = None
         seg = self.segmenter
         if seg is not None and self.settings.echo_guard:

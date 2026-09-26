@@ -830,8 +830,10 @@ async def scenario_final_tool_goodbye(verbose: bool) -> tuple[Check, dict[str, A
 REPLY = "So here's the thing about long days, they don't really end, they just sort of fade out until you notice you're on the couch."
 
 
-async def _speaking_barge_in(verbose: bool, partial: str | None, late_text: str, *, storm: bool = False) -> tuple[Check, Any, Any, Any]:
-    """Eva says REPLY; 0.3 s into it a 1.0 s VAD onset happens. ``partial`` is what the streaming STT
+async def _speaking_barge_in(
+    verbose: bool, partial: str | None, late_text: str, *, storm: bool = False, onset_s: float = 1.0
+) -> tuple[Check, Any, Any, Any]:
+    """Eva says REPLY; 0.3 s into it an ``onset_s`` VAD onset happens. ``partial`` is what the streaming STT
     reports 0.15 s after the onset (None = no partial at all); ``late_text`` is the final transcript."""
     c = Check()
     player = MockPlayer(24_000)
@@ -844,7 +846,7 @@ async def _speaking_barge_in(verbose: bool, partial: str | None, late_text: str,
 
     def hook(name: str, data: dict[str, Any]) -> None:
         if name == "audio_start" and len(log.all("audio_start")) == 1:
-            seg.schedule(time.perf_counter() + 0.3, 1.0)
+            seg.schedule(time.perf_counter() + 0.3, onset_s)
         if name == "barge_in_candidate" and partial is not None:
             asyncio.get_running_loop().call_later(0.15, stt.emit_partial, partial)
 
@@ -906,6 +908,21 @@ async def scenario_storm_needs_final_text(verbose: bool) -> tuple[Check, dict[st
     bi = log.first("barge_in")
     c.ok(bi is not None and bi[1]["reason"] == "barge-in (late)", f"storm: expected only the late path, got {bi}")
     c.ok(len(turns) == 2 and turns[1].user_text == "Wait, stop, I have a question.", "storm: interjection lost")
+    return c, {"turns": _turn_rows(turns)}
+
+
+async def scenario_echo_transcript_after_she_stopped(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(zb) live log 2026-09-25, laptop speakers: her echo ran 1.5 s with no partial, counted as a
+    person and cut her off; its transcript ("You'll probably smell bad when you stop asking" for
+    "You'll probably feel it more when you") was then answered as the user. The self-echo gate
+    only ran its fuzzy rule while she was still audible, and by transcription time she never is.
+    An utterance that began while she was audible and reads as a garbled copy of her words is dropped."""
+    c, log, turns, agent = await _speaking_barge_in(
+        verbose, None, "So here is the thing about long days.", onset_s=2.0
+    )
+    c.ok(bool(turns) and turns[0].interrupted, "setup: the sustained onset should have cut her off")
+    c.ok(len(turns) == 1, f"her own echo was answered as a user turn: {[t.user_text for t in turns]}")
+    c.ok(log.first("stt_echo") is not None, "no stt_echo line for the dropped transcript")
     return c, {"turns": _turn_rows(turns)}
 
 
@@ -1018,6 +1035,7 @@ SCENARIOS = [
     ("y_continuous_audio_inside_a_chunk", scenario_continuous_audio_inside_a_chunk),
     ("z_foreign_language_label_keeps_language", scenario_foreign_language_label_keeps_language),
     ("za_english_session_never_switches", scenario_english_session_never_switches),
+    ("zb_echo_transcript_after_she_stopped", scenario_echo_transcript_after_she_stopped),
 ]
 
 
