@@ -73,6 +73,20 @@ LOCKED_LANGUAGE_RULE = (
     "Language. This conversation is in {language}: always answer in {language}, even if a word "
     "or a sentence from {user_name} comes through in another language."
 )
+# For a voice with its own short list of sounds (Orpheus, Chatterbox Turbo): {sounds} is the
+# list, {cues} either empty or CUE_SENTENCE.
+SOUNDS_RULE = (
+    "Delivery. Your voice can make a few real sounds, written inline exactly like this: {sounds}. "
+    "Use one only where a person really would, like a laugh at something actually funny or a sigh "
+    "at something heavy, at most one per reply, never instead of words.{cues} Never write any other "
+    "bracketed text, no stage directions, no asterisks."
+)
+CUE_SENTENCE = (
+    " You may also begin a reply with one mood cue from this list: [warm] [soft] [gentle] [quiet] "
+    "[sad] [thoughtful] [bright] [playful] [teasing] [excited] [curious] [amused] [serious]; it is "
+    "never spoken, it only colours the voice, and it stays the same from one reply to the next "
+    "unless the mood really shifts."
+)
 AUDIO_TAGS_FORBIDDEN = (
     "Audio tags. Never write bracketed stage directions or sound tags like [laughs] or "
     "[sighs]; they'd be read aloud or dropped. Show feeling through word choice and "
@@ -226,11 +240,14 @@ def render(
     delivery_cues: bool = False,
     locked_language: str | None = None,
     languages: list[str] | None = None,
+    sounds: list[str] | None = None,
 ) -> str:
     """Fill the persona template and return the final system prompt.
 
     ``supports_audio_tags`` decides whether ``{audio_tags_rule}`` becomes permission
-    to use a few ElevenLabs-v3 style tags or a rule to never write bracketed tags.
+    to use a few ElevenLabs-v3 style tags or a rule to never write bracketed tags;
+    ``sounds`` (e.g. ``["laughs", "sighs"]``) narrows that permission to the sounds the
+    voice actually renders.
     ``locked_language`` (a language name, e.g. "Russian") turns ``{language_rule}`` into
     "always answer in <language>"; without it the bilingual follow-the-user rule is used,
     plus, when ``languages`` (names, e.g. ``["English", "Russian"]``) has two or more, the
@@ -238,7 +255,10 @@ def render(
     Empty or ``None`` ``memory_text`` / ``tool_notes`` / ``user_name`` / ``now`` get
     sensible fallbacks so the prompt never contains a dangling empty section.
     """
-    if supports_audio_tags:
+    if supports_audio_tags and sounds:
+        listed = " ".join(f"[{s}]" for s in sounds)
+        delivery = SOUNDS_RULE.replace("{sounds}", listed).replace("{cues}", CUE_SENTENCE if delivery_cues else "")
+    elif supports_audio_tags:
         delivery = AUDIO_TAGS_ALLOWED  # v3: cues AND sounds inline
     elif delivery_cues:
         delivery = DELIVERY_CUES_ONLY  # flash/turbo: cues mapped to voice settings

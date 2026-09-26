@@ -1,0 +1,9 @@
+# English: what changes with the language, nothing else (the persona prompt lives in
+# eva/assets/personas/en/*.md). Loaded by eva.lang.
+code = "en"
+name = "English"                 # how the greeting instruction names the language
+stt_language_code = "en"         # ElevenLabs Scribe hint, sent only in a locked mode (--lang en)
+voice = "eva_en"                 # ElevenLabs voice: a name from config.EL_VOICES or a raw voice id
+fillers = ["mm", "hmm", "okay, so", "mm, hang on", "right"]
+tool_hints = ["one sec", "let me check that", "hang on, looking"]
+backchannels = ["mm-hm", "yeah", "right"]

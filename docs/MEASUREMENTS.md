@@ -61,3 +61,53 @@ they are scaffolding and fine-tuning targets whatever the brain.
 
 Not tested: the persona is one long rule-heavy prompt written for a 27B. A short persona may suit
 the 1–2B models better; that would be the next brain experiment if a small brain is wanted.
+
+## Expressive local voices (2026-09-25)
+
+Owner's direction: small brains (1-2B) to leave room on the GPU for expressive voices, and
+variants to talk to. Every figure below is from this laptop, one run unless a range is given.
+
+**Orpheus 3B** (Canopy Labs, `legraphista/Orpheus:3b-ft-q4_k_m` in Ollama, SNAC 24 kHz decoder):
+
+* 2.12 GB in Ollama at a 2k context. Generates 70.6-71.0 tok/s alone on the GPU; real time needs
+  82 (7 codes per 85.3 ms frame), so **0.86x real time**. The GPU runs flat out (2565 MHz, 74 W of
+  93, memory controller 98-100 %): it is bandwidth-bound. Unsloth's dynamic 3-bit build
+  (`UD-Q3_K_XL`, 1.87 GB) gave 73.4-73.9 tok/s, 0.90x: the model reads its 156k-token output layer
+  at full size every token either way.
+* SNAC decoding on the GPU takes 4.7 ms a window, but from the voice server's process it fights
+  Ollama's for the card: generation fell to 49 tok/s decoding every frame, 63 decoding every 4
+  frames. On the CPU (8 threads, 45 ms for a 7-frame window, 13 % of real time) generation stays at
+  70-72 tok/s. Decoder on the CPU, every 4 frames.
+* Every clip opens with ~0.55 s of silence at -52 dBFS and closes with ~0.5 s. Trimmed at both ends
+  (`EdgeTrim`), and the opening silence is prefilled as 5 frames in the prompt instead of generated:
+  first voiced frame 0.22-0.36 s after the request against 0.57-1.25 s (3 takes each).
+* Streaming: playback starts after a pre-roll of about 14 % of the clip's estimated length, so it
+  never runs dry at 0.86x. First audio 1.1 s for short lines, up to ~2.7 s for a long sentence.
+* Without `stop: <custom_token_2>` the model ran on after its line into a new utterance in another
+  voice ("julia: I thought a quiet day at home...").
+
+**Chatterbox Turbo** (Resemble, 350M, cloning `eva/assets/voices/eva.wav`): 3.03 GB PyTorch peak,
+3.07 GB reserved; 2.2-2.6x real time (0.83 s for 1.8 s of speech), whole sentences (no streaming).
+With three stale Ollama models loaded it ran at **0.05x** real time: the card had spilled into
+system RAM. Load 16 s.
+
+**Chatterbox** (0.5B, `exaggeration` / `cfg_weight` per request): 3.44 GB peak, 3.59 GB reserved;
+0.98-1.19x real time (2.37 s for 2.32 s of speech at exaggeration 0.5; 4.14 s for 4.92 s at 0.9).
+Load 16.9 s.
+
+**End to end** (`bench/e2e_sim.py`, three recorded utterances through the real STT, brain and
+voice into a silent player; "total" is the user's last word to her first audio):
+
+| variant | stt | brain first token | voice first audio | total |
+|---|---|---|---|---|
+| minicpm1b + kokoro | 0.24-0.55 s | 0.24-0.42 s | 0.68-1.05 s | 1.47-1.70 s |
+| qwen2b + orpheus-tara (before prefill / CPU decoder) | 0.23-0.53 s | 0.35-0.83 s | 1.13-3.25 s | 2.26-4.02 s |
+| minicpm1b + orpheus-tara (prefill, CPU decoder, tool gate) | 0.23-0.54 s | 0.23-0.28 s | 1.21-2.59 s | 1.71-3.13 s |
+
+In the first minicpm1b run the brain, offered every tool, checked the clock after "how's it
+going?" and ended the call in the middle of "today was rough"; the tool gate (`eva/toolgate.py`)
+now offers only the tools the user's line points at (test `zc_tool_gate`, which fails on the first
+version: a spoken line keeps its transcript on the turn's metrics).
+
+Ideas not yet tried for Orpheus' speed: prune its output layer to the ~28k audio tokens (most of
+the per-token read), a smaller Orpheus-style model, or llama.cpp's own server with CUDA graphs.
