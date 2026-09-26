@@ -32,7 +32,7 @@ CANDIDATES: list[tuple[str, str]] = [
     ("qwen3.5:2b-q4_K_M", "Qwen 3.5 2B (2026-03): best 2B on Artificial Analysis' index"),
     ("openbmb/minicpm5-2b", "MiniCPM5 2B (2026-09-07): the newest 2B"),
     ("LiquidAI/lfm2.5-1.2b-instruct:q8_0", "LFM2.5 1.2B (Liquid): built for on-device chat"),
-    ("openbmb/minicpm5-1b", "MiniCPM5 1B (2026-05): claims best 1B"),
+    ("openbmb/minicpm5:q8_0", "MiniCPM5 1B (2026-05): claims best 1B"),  # the README's minicpm5-1b tag doesn't exist
     ("gemma3:1b-it-qat", "Gemma 3 1B QAT (2025): Google's conversational register"),
     ("qwen3.5:0.8b", "Qwen 3.5 0.8B (2026-03): the floor"),
     ("qwen3:4b-instruct-2507-q4_K_M", "reference: today's 4B brain"),
@@ -152,9 +152,14 @@ def loaded(c: httpx.Client) -> list[dict[str, Any]]:
     return r.json().get("models") or []
 
 
+def full_tag(model: str) -> str:
+    """``ollama ps`` lists an untagged pull as ``name:latest``."""
+    return model if ":" in model.rsplit("/", 1)[-1] else model + ":latest"
+
+
 def unload_all(c: httpx.Client, keep: str | None = None) -> list[str]:
     """Unload every model but ``keep`` and wait until they are gone (clean VRAM numbers)."""
-    names = [m["name"] for m in loaded(c) if m["name"] != keep]
+    names = [m["name"] for m in loaded(c) if keep is None or m["name"] != full_tag(keep)]
     for name in names:
         c.post(f"{OLLAMA}/api/generate", json={"model": name, "keep_alive": 0})
     deadline = time.monotonic() + 15
@@ -174,7 +179,7 @@ def load(c: httpx.Client, model: str) -> float:
 def vram(c: httpx.Client, model: str) -> dict[str, Any]:
     """What ``ollama ps`` says about ``model``: bytes in VRAM, total bytes, context."""
     for m in loaded(c):
-        if m["name"] == model or m.get("model") == model:
+        if full_tag(model) in (m["name"], m.get("model")):
             return {"size_vram": m.get("size_vram", 0), "size": m.get("size", 0), "context": m.get("context_length")}
     return {"size_vram": 0, "size": 0, "context": None}
 

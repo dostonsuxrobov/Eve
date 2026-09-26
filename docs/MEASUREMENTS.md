@@ -1,0 +1,63 @@
+# Measurements (local build)
+
+Every number of the local build, dated, with how it was taken. The cloud era's numbers and bug
+hunts are in `.archive/docs/MEASUREMENTS.md`.
+
+The machine: RTX 4050 laptop GPU, 6141 MiB; `nvidia-smi` reads 0 MiB used with nothing loaded.
+
+## Small brains against the 4B (2026-09-25)
+
+Question (owner): would a 1–2B brain leave more room on the GPU for an expressive voice without
+losing the feel?
+
+Method: `bench/brains.py`. Each model alone on the GPU through Ollama 0.34 at 127.0.0.1,
+context 8192, the model's own sampling defaults, thinking off where the model has it. The
+English Eva persona (about 2.5k tokens, written for the cloud-era 27B) with the stand-in user
+Sam and his memory; the ten English example conversations (41 user turns, each model's own
+replies fed back); then the six cloud-era tool cases with Eva's seven tools. One run each.
+"On the GPU" is `nvidia-smi` with the model loaded: `ollama ps` leaves out the Qwen 3.5 vision
+encoder (0.2–0.7 GB) and the ~0.1 GB CUDA context. "Flagged" is a turn with at least one rule
+break a script can see (over 40 words, more than one question, emoji, `*action*`, `[tag]`,
+list, a promised action with no tools, a phrase the persona bans, the same opening as the reply
+before).
+
+| model | params, quant | on the GPU | left for a voice | first reply | to first word, median | decode | words/reply, median | flagged | tool probe |
+|---|---|---|---|---|---|---|---|---|---|
+| `qwen3:4b-instruct-2507-q4_K_M` (today's) | 4.0B Q4_K_M | 3255 MiB | 2.8 GB | 0.71 s | 0.07 s | 56 tok/s | 18 | 7/41 | 4/6 |
+| `qwen3.5:2b-q4_K_M` | 2.3B Q4_K_M | 2411 MiB | 3.6 GB | 0.44 s | 0.08 s | 99 tok/s | 51 | 34/41 | 3/6 |
+| `openbmb/minicpm5-2b` | 2.5B Q4_K_M | 1737 MiB | 4.3 GB | 0.45 s | 0.06 s | 92 tok/s | 50 | 28/41 | 3/6 |
+| `LiquidAI/lfm2.5-1.2b-instruct:q8_0` | 1.2B Q8_0 | 1465 MiB | 4.6 GB | 0.25 s | 0.04 s | 123 tok/s | 23 | 19/41 | 2/6 |
+| `openbmb/minicpm5:q8_0` (the 1B) | 1.1B Q8_0 | 1183 MiB | 4.8 GB | 0.19 s | 0.04 s | 142 tok/s | 16 | 19/41 | 4/6 |
+| `gemma3:1b-it-qat` | 1.0B Q4_0 | 1197 MiB | 4.8 GB | 0.30 s | 0.08 s | 123 tok/s | 17 | 15/41 | no tools |
+| `qwen3.5:0.8b` | 0.9B Q8_0 | 1417 MiB | 4.6 GB | 0.30 s | 0.08 s | 132 tok/s | 52 | 29/41 | 2/6 |
+
+"First reply" reads the whole persona; later turns reuse it from Ollama's prompt cache, so the
+time to the first word is under a tenth of a second for every model. Speed is not what
+separates them: even the 4B decodes about 17 times faster than she speaks. Load time 2.8–5.1 s
+for all.
+
+What the transcripts show (`bench/out/brains/`, not committed; quotes verbatim):
+
+* **4B:** short and dry, reacts before it asks ("okay, so you do. That's enough." to "I guess I
+  do care a bit"). Still invents shared memories ("Miso's been sleeping on the windowsill again,
+  hasn't he?"), answers the late-night sick cat with "Call the vet again." and "One sec. I've got
+  it.", and writes the stomach-bug lie. Tools: says "One sec, setting that timer" with no call;
+  writes `end_conversation{...}` as text.
+* **Qwen 3.5 2B:** fluent but long (27 of 41 replies over 40 words) and gets facts wrong ("your
+  manager canceled a six-month project", "I know how you feel").
+* **MiniCPM5 2B:** long, and loses the thread ("Never again leave Sam and Miso behind. Get into
+  the car now"; `[small pause]` as a whole reply).
+* **LFM2.5 1.2B:** help-desk register ("You're not alone in this", "you've got this"); invents
+  the weather ("It's a bit cloudy today") and a quiet Miso; tells the sick-cat owner to try broth.
+* **MiniCPM5 1B:** the best small tool caller (timer 480 s and the note, both right) but answers
+  "mm" to every line of two whole scenarios, including "Are you a real person?".
+* **Gemma 3 1B:** wraps replies in quotes, writes "(Pause, a slight shift in tone)", says
+  "it's 911, let me dial" and offers "a few options" for the lie. No tool support in Ollama.
+* **Qwen 3.5 0.8B:** mostly incoherent ("Miso is getting better soon; that's good news").
+
+Failures every model shares, the 4B included: invented memories, writing the lie, and no clean
+"call the emergency line now" for the sick cat. They don't go away with size in this range, so
+they are scaffolding and fine-tuning targets whatever the brain.
+
+Not tested: the persona is one long rule-heavy prompt written for a 27B. A short persona may suit
+the 1–2B models better; that would be the next brain experiment if a small brain is wanted.

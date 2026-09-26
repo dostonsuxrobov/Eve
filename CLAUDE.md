@@ -47,8 +47,11 @@ numbers are `.archive/docs/MEASUREMENTS.md` and `.archive/docs/EVAL_REPORT.md`.
   written to fix a *different* audio complaint.
 * **Local baseline on record (2026-09-19/25), the numbers to beat:** fully local median 2.1 s
   from the user's last word to her first audio (4B first-sentence TTFT 1.1–1.4 s, 0.3 s with a
-  warm prefix, 7.2 s on a cold load; Kokoro first audio 0.3–0.55 s; endpoint wait on top);
-  Ollama keeps ~3 GB resident with the 4B.
+  warm prefix, 7.2 s on a cold load; Kokoro first audio 0.3–0.55 s; endpoint wait on top).
+* **The 4B alone, measured 2026-09-25** (`docs/MEASUREMENTS.md`): 3255 MiB on the GPU at an 8k
+  context, which leaves 2.8 GB for STT and voice; 56 tok/s; 0.07 s to the first word with the
+  persona cached, 0.71 s on the first reply. Brains of 1–2B free up to 2 GB more, but none kept
+  Eva's register on the same persona (same file).
 * **4B behaviours on record: targets for scaffolding and fine-tuning.** Says an action ("One
   sec, setting that timer") without calling the tool (3/6 on `.archive/bench/tool_probe.py`); invents
   shared memories and physical presence; reuses example lines from the prompt verbatim; emoji
