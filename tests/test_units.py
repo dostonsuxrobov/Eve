@@ -308,3 +308,71 @@ def test_tool_gate_triggers() -> None:
     assert offers("What time is it right now?") == {"get_current_time"}
     assert {"set_timer", "remember_note"} <= offers("Can you set a timer for eight minutes and remind me to call my mom?")
     assert offers("Is it going to rain in Philadelphia today?") == {"get_weather"}
+
+
+# ------------------------------------------------------------------- small-brain scaffolding
+def test_speech_guard_drops_what_the_1b_said_on_2026_09_26() -> None:
+    """Every line here was spoken by MiniCPM5 1B in the owner's sessions; the guard must drop
+    each one and let an ordinary reply through."""
+    from eva.guard import SpeechGuard
+
+    g = SpeechGuard(user_name="Doston", tool_names=("get_weather", "set_timer"),
+                    known="- doston: is working on a project called skynet.")
+    for line, why in [
+        ("Hello, I'm Doston, just a simple hello today.", "took the user's name"),
+        ("I need to call the get_weather function to check the current weather.", "tool talk"),
+        ('<function name="set_timer"><param name="duration">6</param></function>', "markup"),
+        ("I have been working on the Skynet project as well.", "claims the user's work as hers"),
+        ("I'll have to look up the information.", "promises an action with no tool"),
+        ("It's been a while since we talked.", "claims a shared past that isn't in her memory"),
+    ]:
+        kept, dropped = g.filter(line, tools_offered=False)
+        assert kept == "" and dropped and dropped[0][1] == why, (line, dropped)
+    kept, _ = g.filter("Yeah, that one creeps in on quiet Saturdays.", tools_offered=False)
+    assert kept == "Yeah, that one creeps in on quiet Saturdays."
+    kept, dropped = g.filter("Yeah, that one creeps in on quiet Saturdays!", tools_offered=False)
+    assert kept == "" and dropped[0][1] == "repeats herself"
+    kept, _ = g.filter("Let me check the weather.", tools_offered=True)  # a real tool is behind it
+    assert kept == "Let me check the weather."
+    kept, _ = g.filter("Last time we talked about Skynet, you sounded proud.", tools_offered=False)
+    assert kept  # a shared past that IS in her memory
+
+
+def test_memory_lines_say_whose_fact_and_weather_goes_home() -> None:
+    from eva.memory import Memory
+    from eva.toolgate import ToolGate, home_city
+
+    m = Memory(Path("unused.json"))
+    m.facts = ["Is working on a project called Skynet.", "Lives in Philadelphia, Pennsylvania.", "Priya is a friend."]
+    text = m.as_prompt_text(subject="Doston")
+    assert "- Doston: is working on a project called Skynet." in text and "- Doston: Priya is a friend." in text
+    assert m.as_prompt_text() == "- Is working on a project called Skynet.\n- Lives in Philadelphia, Pennsylvania.\n- Priya is a friend."
+    gate = ToolGate(home_city=home_city(m.facts))
+    assert gate.home_city == "Philadelphia"
+    gate.filter("Can you check the weather for me please?", [])
+    assert gate.fix_args("get_weather", {"city": "New York"}) == {"city": "Philadelphia"}
+    gate.filter("What's the weather in Boston?", [])
+    assert gate.fix_args("get_weather", {"city": "Boston"}) == {"city": "Boston"}
+
+
+def test_router_answers_plain_questions_itself() -> None:
+    """With a plain weather or time question the loop calls the tool itself (the 1B called it in
+    2 of 8 replayed sessions and made the weather up in others)."""
+    from eva.toolgate import ToolGate
+
+    g = ToolGate(home_city="Philadelphia")
+    assert g.route("Yeah, can you check the weather for me please?") == [("get_weather", {"city": "Philadelphia"})]
+    assert g.route("What's the weather in New York today?") == [("get_weather", {"city": "New York"})]
+    assert g.route("What time is it?") == [("get_current_time", {})]
+    assert g.route("What's the difference between the tree and the house?") == []
+    assert ToolGate().route("Is it going to rain?") == []  # no home city known: the brain asks
+
+
+def test_guard_drops_thinking_out_loud() -> None:
+    from eva.guard import SpeechGuard
+
+    g = SpeechGuard(user_name="Doston")
+    for line in ("I need to ask Doston for the city to check the weather so I will request the city information.",
+                 "I'm going to check the weather since the user asked.", "I'll ask the user."):
+        kept, dropped = g.filter(line, tools_offered=True)
+        assert kept == "" and dropped[0][1] == "thinking out loud", line

@@ -125,8 +125,9 @@ why. That is how bugs get reported.
    1.7-3.1 s with Orpheus.
 2. **Latency:** Orpheus is the slow part (0.87x real time here, 1.1-1.8 s to its first sound);
    ideas in docs/MEASUREMENTS.md. Then end-of-turn prediction from the partials. Target <= 0.8 s.
-3. **Tools by scaffolding:** the tool gate is in; next, force the call when a reply promises an
-   action, and never let a promise stand without a call.
+3. **Scaffolding for small brains:** tool gate, speech guard (`eva/guard.py`), the loop answering
+   plain weather/time questions itself, memory lines with the user's name: 18/56 -> 0/56 flagged
+   replies on the owner's replayed lines (`bench/replay.py`). Next: help-desk lines, coherence.
 4. **Feel:** the owner talks to the variants; a local measure of feel that agrees with his ear
    (rated live sessions, the brain behaviours on record as tests); prompt, scaffold and fine-tune
    the chosen brain on conversations he approves.

@@ -69,6 +69,19 @@ def _similar(a: str, b: str, threshold: float = 0.8) -> bool:
     return len(ta & tb) / len(ta | tb) >= threshold
 
 
+_VERBS = frozenset(
+    "is was has had lives lived works worked speaks likes loves wants prefers considers mentioned does plays "
+    "enjoys studies knows uses drinks eats hates feels thinks calls goes needs tries plans recently often "
+    "usually has been will would can could".split()
+)
+
+
+def _lower_verb(fact: str) -> str:
+    """"Is working on X" -> "is working on X"; "Priya is ..." stays as it is."""
+    first = fact.split(" ", 1)[0].lower()
+    return fact[0].lower() + fact[1:] if fact and first in _VERBS else fact
+
+
 @dataclass
 class Memory:
     """Persistent list of short facts about the user."""
@@ -135,9 +148,16 @@ class Memory:
         self.facts = []
 
     # ---------------------------------------------------------------- render
-    def as_prompt_text(self) -> str:
-        """Facts as short lines for the ``{memory}`` slot ("" when empty)."""
-        return "\n".join(f"- {f}" for f in self.facts)
+    def as_prompt_text(self, subject: str | None = None) -> str:
+        """Facts as short lines for the ``{memory}`` slot ("" when empty).
+
+        With ``subject`` (the user's name) each line says whose fact it is: facts are stored
+        without one ("Is working on a project called Skynet"), and a 1B brain read them as its
+        own ("I have been working on the Skynet project as well", 2026-09-26).
+        """
+        if not subject:
+            return "\n".join(f"- {f}" for f in self.facts)
+        return "\n".join(f"- {subject}: {_lower_verb(f)}" for f in self.facts)
 
     def drop_name_facts(self, user_name: str) -> list[str]:
         """Forget facts that state the user's name or file ``user_name`` as another person.

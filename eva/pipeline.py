@@ -147,6 +147,9 @@ ECHO_STORM_HOLD_S = 30.0  # ... make barge-in demand the final transcript for th
 _LETTERS_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 EMPTY_REPLY_PREFILL = "Mm."
 EMPTY_REPLY_TEXT = "Hm, sorry, I lost my train of thought there. Say that again?"
+# Sent as a last system message when the speech guard dropped a whole reply (eva/guard.py).
+GUARD_NUDGE = ("Answer what they just said, in one or two short sentences, in new words. Don't repeat anything "
+               "you said before, don't talk about tools or functions, and don't claim anything you don't know.")
 LLM_FAILURE_TEXT = "Sorry, I'm having trouble thinking right now. Give me a moment and try again."
 
 
@@ -364,6 +367,7 @@ class _Turn:
     rounds_in_history: int = 0  # assistant tool-call messages already appended
     recovered_seq: list[int] = field(default_factory=lambda: [0])  # ids for recovered tool calls
     tools: "list[Tool] | None" = None  # the tools offered this turn (None: all of them)
+    dropped: list[str] = field(default_factory=list)  # sentences the speech guard kept her from saying
     finished: bool = False
     cancelled: bool = False  # set before the task is cancelled: no child may write audio after this
     error: str | None = None
@@ -404,6 +408,9 @@ class VoiceAgent:
         sanitizer: Sanitizer | None = None,
         tool_executor: ToolExecutor | None = None,
         tool_filter: "Callable[[str, list[Tool]], list[Tool]] | None" = None,
+        speech_guard: Any = None,
+        tool_args: "Callable[[str, dict[str, Any]], dict[str, Any]] | None" = None,
+        tool_router: "Callable[[str], list[tuple[str, dict[str, Any]]]] | None" = None,
         pending_events: "asyncio.Queue[dict[str, Any]] | None" = None,
         languages: "list[str] | None" = None,
     ) -> None:
@@ -426,6 +433,13 @@ class VoiceAgent:
         self.tool_executor: ToolExecutor = tool_executor or tools_mod.execute
         # narrows the tools per turn from the user's words (eva.toolgate, for small brains)
         self.tool_filter = tool_filter
+        # eva.guard.SpeechGuard for small brains: drops sentences she must not say (and keeps
+        # them out of the history); tool_args fixes arguments the brain got wrong (eva.toolgate)
+        self.speech_guard = speech_guard
+        self.tool_args = tool_args
+        # calls the loop makes itself for a plain question (the weather, the time) before the
+        # brain speaks, so a small brain answers from a real result (eva.toolgate.ToolGate.route)
+        self.tool_router = tool_router
         self.pending_events: "asyncio.Queue[dict[str, Any]]" = (
             pending_events if pending_events is not None else tools_mod.pending_events
         )
@@ -1109,12 +1123,39 @@ class VoiceAgent:
         begin = getattr(self.tts, "begin_turn", None)
         if callable(begin):
             begin()  # hybrid first-chunk model + prosodic continuity restart per reply
+        if self.speech_guard is not None and turn.kind != "event":
+            self.speech_guard.heard(turn.metrics.user_text or turn.user_text or "")
         offered = self.tools
         if self.tool_filter is not None:
             # a spoken turn has its transcript on the metrics (turn.user_text is for typed / event turns)
             offered = self.tool_filter(turn.metrics.user_text or turn.user_text or "", self.tools)
             if len(offered) != len(self.tools):
                 self._emit("tools_gated", {"offered": [t.name for t in offered]})
+        if self.tool_router is not None and turn.kind != "event":
+            routed = [(n, a) for n, a in self.tool_router(turn.metrics.user_text or turn.user_text or "")
+                      if any(t.name == n for t in self.tools)]
+            if routed:
+                calls = [LLMToolCall(id=f"routed_{len(self.messages)}_{i}", name=n, arguments=dict(a))
+                         for i, (n, a) in enumerate(routed)]
+                self._emit("tools_routed", {"names": [c.name for c in calls]})
+                # not counted in rounds_in_history: nothing was spoken with it
+                self.messages.append({"role": "assistant", "content": "", "tool_calls": [
+                    {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": json.dumps(c.arguments)}}
+                    for c in calls]})
+                answered: set[str] = set()
+                try:
+                    for c in calls:
+                        result = await self._execute_tool(turn, c)
+                        self.messages.append({"role": "tool", "tool_call_id": c.id, "content": result})
+                        answered.add(c.id)
+                except asyncio.CancelledError:
+                    for c in calls:
+                        if c.id not in answered:
+                            self.messages.append({"role": "tool", "tool_call_id": c.id, "content": TOOL_CANCELLED_RESULT})
+                    raise
+                # the answer is in: don't offer the same tools again for this line
+                done = {c.name for c in calls}
+                offered = [t for t in offered if t.name not in done]
         turn.tools = offered
         schemas = [t.openai_schema() for t in offered] or None
         jobs: "asyncio.Queue[_ChunkJob | None]" = asyncio.Queue()
@@ -1123,11 +1164,13 @@ class VoiceAgent:
         last_results: list[str] = []
         round_no = 0
         empty_attempts = 0
+        guard_retried = False
         prefill: str | None = None
+        nudge: str | None = None
         while True:
             use_tools = schemas if round_no < MAX_TOOL_ROUNDS else None
             try:
-                round_text, tool_calls = await self._llm_round(turn, jobs, round_no, use_tools, prefill=prefill)
+                round_text, tool_calls = await self._llm_round(turn, jobs, round_no, use_tools, prefill=prefill, nudge=nudge)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1158,6 +1201,15 @@ class VoiceAgent:
                 self._emit("llm_empty", {"round": round_no, "action": "fallback"})
                 round_text = EMPTY_REPLY_TEXT
                 self._enqueue(turn, jobs, round_no, round_text)
+            if not tool_calls and self.speech_guard is not None and not round_text.strip() and turn.dropped:
+                # everything she said was dropped: ask once more, then say she lost the thread
+                if not guard_retried:
+                    guard_retried = True
+                    nudge = GUARD_NUDGE
+                    self._emit("reply_retry", {"reason": "every sentence was dropped"})
+                    continue
+                round_text = EMPTY_REPLY_TEXT
+                self._enqueue(turn, jobs, round_no, round_text, is_hint=True)
             if not tool_calls:
                 final_text = round_text
                 break
@@ -1229,6 +1281,7 @@ class VoiceAgent:
         use_tools: list[dict[str, Any]] | None,
         *,
         prefill: str | None = None,
+        nudge: str | None = None,
     ) -> tuple[str, list[LLMToolCall]]:
         """One LLM request: stream deltas into the chunker, collect tool calls.
 
@@ -1257,8 +1310,9 @@ class VoiceAgent:
                 self._emit("chunk_dropped", {"reason": "duplicate", "text": chunk})
                 return
             seen.add(key)
-            raw_parts.append(chunk)
-            self._enqueue(turn, jobs, round_no, chunk)
+            kept = self._enqueue(turn, jobs, round_no, chunk)
+            if kept:
+                raw_parts.append(kept)
 
         def push(text: str) -> None:
             nonlocal prefill_pending
@@ -1268,6 +1322,8 @@ class VoiceAgent:
                 accept(c)
 
         messages = self._messages_for_llm()
+        if nudge:
+            messages.append({"role": "system", "content": nudge})
         if prefill:
             messages.append({"role": "assistant", "content": prefill})
         await self._await_ping()
@@ -1306,7 +1362,9 @@ class VoiceAgent:
 
     def _enqueue(
         self, turn: _Turn, jobs: "asyncio.Queue[_ChunkJob | None]", round_no: int, raw: str, *, is_hint: bool = False
-    ) -> None:
+    ) -> str:
+        """Queue one chunk for the voice. Returns what goes into the history for it: the raw
+        chunk, or with a speech guard only the sentences it let through ("" if none)."""
         cue, body = extract_cue(raw)
         if is_hint:
             cue = None
@@ -1317,6 +1375,14 @@ class VoiceAgent:
         text = self.sanitizer(body, self.tts.supports_audio_tags).strip()
         if text and not _SPEAKABLE_RE.search(text):
             text = ""  # brace / punctuation debris ("} }"): nothing to say, and ElevenLabs answers 400
+        history = raw.strip()
+        if self.speech_guard is not None and not is_hint:
+            offered = self.tools if turn.tools is None else turn.tools
+            text, dropped = self.speech_guard.filter(text, tools_offered=bool(offered))
+            for sentence, why in dropped:
+                turn.dropped.append(sentence)
+                self._emit("sentence_dropped", {"reason": why, "text": sentence[:140]})
+            history = text
         job = _ChunkJob(index=len(turn.chunks), round=round_no, raw=raw.strip(), text=text, is_hint=is_hint, cue=cue)
         turn.chunks.append(job)
         if job.silent:
@@ -1324,6 +1390,7 @@ class VoiceAgent:
         else:
             self._spawn(turn, self._synth(turn, job), f"eva-tts-{job.index}")
         jobs.put_nowait(job)
+        return history
 
     async def _synth(self, turn: _Turn, job: _ChunkJob) -> None:
         """Synthesize one chunk, at most ``tts_parallelism`` chunks ahead of playback."""
@@ -1536,6 +1603,11 @@ class VoiceAgent:
         return None
 
     async def _execute_tool(self, turn: _Turn, tc: LLMToolCall) -> str:
+        if self.tool_args is not None:
+            fixed = self.tool_args(tc.name, dict(tc.arguments))
+            if fixed != tc.arguments:
+                self._emit("tool_args_fixed", {"name": tc.name, "from": tc.arguments, "to": fixed})
+                tc = LLMToolCall(id=tc.id, name=tc.name, arguments=fixed)
         self._emit("tool_call", {"name": tc.name, "arguments": tc.arguments})
         t0 = _now()
         try:
@@ -1766,7 +1838,8 @@ class VoiceAgent:
             name = ev.get("user_name") or "them"
             lang = str(ev.get("language") or {"ru": "Russian", "en": "English"}.get(str(ev.get("lang") or "en"), "English"))
             return (
-                f"[system: the conversation just started. Say hello to {name} in {lang} the way you "
+                f"[system: the conversation just started. You are Eva; {name} is the person you are talking "
+                f"with. Say hello to {name} in {lang} the way you "
                 "greet someone you talk to every day: one short, unhurried sentence in your own words, "
                 "no 'how can I help', no task talk, no question needed. Then wait for them.]"
             )

@@ -209,7 +209,7 @@ class WebServer:
             s.stt, s.llm, s.tts, s.system_prompt, s.tools, settings,
             frames=mic.frames(), segmenter=segmenter, player=player,
             fillers=s.fillers, tool_hints=s.tool_hints, backchannels=s.backchannels, on_event=on_event,
-            languages=s.plan.codes, tool_filter=s.tool_filter,
+            languages=s.plan.codes, **s.agent_kwargs(),
         )
         await agent.prepare()
         agent._select_lang(s.plan.primary.code)

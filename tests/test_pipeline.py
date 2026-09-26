@@ -1047,6 +1047,43 @@ async def scenario_tool_gate(verbose: bool) -> tuple[Check, dict[str, Any]]:
     return c, {"offered": llm.tools_offered + llm2.tools_offered}
 
 
+async def scenario_tool_router(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(zd) a plain weather question is answered from a real result: the loop calls the tool
+    before the brain speaks, and doesn't offer it again for that line (replays 2026-09-26)."""
+    from eva.toolgate import ToolGate
+
+    c = Check()
+    ran: list[tuple[str, dict[str, Any]]] = []
+
+    def weather(city: str = "") -> str:
+        ran.append(("get_weather", {"city": city}))
+        return f"In {city}: drizzle, 59 degrees."
+
+    tools = [Tool(name="get_weather", description="weather", parameters={"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+                  fn=weather, spoken_hint=None)]
+    gate = ToolGate(home_city="Philadelphia")
+    player = MockPlayer(24_000)
+    log = EventLog(verbose, player)
+    llm = MockLLM(["Drizzle and fifty-nine. Take a jacket."], ttft_s=0.05)
+    agent = _mock_agent(stt=MockSTT([]), llm=llm, tts=MockTTS(), player=player, segmenter=None, frames=None,
+                        settings=_settings(filler_after_ms=0), log=log, tools=tools, tool_filter=gate.filter)
+    agent.tool_router = gate.route
+    agent.tool_executor = lambda tc, ts: _run_tool(tc, ts)
+    m = await agent.say("Can you check the weather for me please?")
+    c.ok(len(log.all("tools_routed")) == 1, "the weather question was not routed")
+    c.ok(llm.tools_offered[0] is None, f"get_weather was offered again after routing: {llm.tools_offered[0]}")
+    roles = [msg["role"] for msg in llm.calls[0]]
+    c.ok(roles[-2:] == ["assistant", "tool"] and "Philadelphia" in llm.calls[0][-1]["content"],
+         f"the brain did not see the result before speaking: {roles[-3:]}")
+    c.ok(m.assistant_text == "Drizzle and fifty-nine. Take a jacket.", f"reply {m.assistant_text!r}")
+    return c, {"history": [msg["role"] for msg in agent.messages]}
+
+
+async def _run_tool(tc: Any, tools: list[Tool]) -> str:
+    tool = next(t for t in tools if t.name == tc.name)
+    return str(tool.fn(**tc.arguments))
+
+
 SCENARIOS = [
     ("a_normal_two_turns", scenario_normal_two_turns),
     ("b_barge_in", scenario_barge_in),
@@ -1077,6 +1114,7 @@ SCENARIOS = [
     ("za_english_session_never_switches", scenario_english_session_never_switches),
     ("zb_echo_transcript_after_she_stopped", scenario_echo_transcript_after_she_stopped),
     ("zc_tool_gate", scenario_tool_gate),
+    ("zd_tool_router", scenario_tool_router),
 ]
 
 

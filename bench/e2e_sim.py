@@ -211,7 +211,7 @@ async def run_real(args: argparse.Namespace) -> int:
         stt, llm, tts, session.system_prompt, session.tools, settings,
         frames=mic.frames(), segmenter=segmenter, player=player, fillers=session.fillers,
         tool_hints=session.tool_hints, backchannels=session.backchannels, on_event=log, max_turns=args.max_turns,
-        languages=session.plan.codes, tool_filter=session.tool_filter,
+        languages=session.plan.codes, **session.agent_kwargs(),
     )
     t0 = time.perf_counter()
     await agent.prepare()

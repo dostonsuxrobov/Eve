@@ -135,6 +135,14 @@ class StatusPrinter:
             console.print(f"[green]{data['kind']}: {escape(data['name'])} is back[/]")
         elif name == "filler":
             console.print(f"[dim]  (filler #{data['index']} at +{data['after_s']:.2f}s)[/]")
+        elif name == "sentence_dropped":
+            console.print(f"[dim]  (didn't say \"{escape(data['text'])}\": {escape(data['reason'])})[/]")
+        elif name == "tools_routed":
+            console.print(f"[dim]  (asked plainly, so I'm looking it up first: {escape(', '.join(data['names']))})[/]")
+        elif name == "reply_retry":
+            console.print(f"[dim]  (asking again: {escape(data['reason'])})[/]")
+        elif name == "tool_args_fixed":
+            console.print(f"[dim]  ({escape(data['name'])}: {escape(str(data['from']))} -> {escape(str(data['to']))}, you didn't name another)[/]")
         elif name == "tools_gated":
             offered = ", ".join(data["offered"]) or "none"
             console.print(f"[dim]  (tools offered for this line: {escape(offered)})[/]")
@@ -348,7 +356,7 @@ async def amain(args: argparse.Namespace) -> int:
         backchannels=session.backchannels,
         on_event=printer,
         languages=plan.codes,
-        tool_filter=session.tool_filter,
+        **session.agent_kwargs(),
     )
     t0 = time.perf_counter()
     await agent.prepare()

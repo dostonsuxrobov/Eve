@@ -260,10 +260,8 @@ def think_setting(capabilities: list[str]) -> bool | None:
 # ------------------------------------------------------------------ style checks
 EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\U0001F000-\U0001F2FF☀-➿⭐⭕]")
 # An action announced in words; with no tools connected nothing is behind it.
-PROMISE_RE = re.compile(
-    r"\b(one sec|hang on|let me (check|look|find|pull|see if)|i'?ll (check|look|find|pull|set|remind|note)|"
-    r"i'?m (looking|checking|setting|pulling)|setting (that|a|the|your) )"
-)
+from eva.guard import PROMISE_RE  # noqa: E402
+
 # Phrases the persona forbids by name.
 BANNED = (
     "let me know if you need", "anything else on your mind", "great question", "i hear you", "holding space",

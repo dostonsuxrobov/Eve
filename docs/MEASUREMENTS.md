@@ -137,3 +137,42 @@ eval's stand-in user). Plus help-desk lines ("I can help with tasks like setting
 The cloud 27B on the Chatterbox prompt, one call: first token 0.72 s, opened with `[amused]`, and
 used the memory as the owner's ("Which model did you end up going with, the smaller one or the
 big one?").
+
+## Scaffolding for a 1B brain (2026-09-26)
+
+The owner's session with MiniCPM5 1B + Chatterbox went wrong where an earlier one hadn't: "Hello,
+I'm Doston", the same two sentences in every reply (once a whole earlier reply again, 18.7 s),
+"I need to call the get_weather function", a tool call spoken as markup, the weather for New York.
+Nothing had changed in the code or the memory between the two sessions: the 1B varies from session
+to session, and one bad reply poisons the rest because it copies its own history.
+
+Method: `bench/replay.py`, the owner's six lines plus the greeting through the real loop and the
+real 1B (a copy of the real memory, stand-in tool results, silent voice), 8 sessions per row.
+Counted on what she would have *said*:
+
+| version | flagged replies | identity | repeat | markup | tool talk | promise | wrong city | real weather calls | help-desk lines | words/reply |
+|---|---|---|---|---|---|---|---|---|---|---|
+| before | 18/56 | 1 | 11 | 1 | 1 | 6 | 3 | 6/8 | 6 | 19 |
+| speech guard + prompt fixes | 1/56 | 0 | 0 | 0 | 0 | 1 | 0 | 2/8 | 10 | 13.5 |
+| + the loop answers plain questions itself | 0/56 | 0 | 0 | 0 | 0 | 0 | 0 | 8/8 | 11 | 12 |
+
+Sessions before the fixes ranged from 0/7 to 5/7 flagged: the owner's "fine last time, broken
+this time" is that spread.
+
+What changed: (1) `eva/guard.py` checks every sentence before it is spoken and drops markup, tool
+names, "I'm <user>", claiming the user's work, promises with no tool offered, a shared past not in
+memory, thinking out loud, and repeats; dropped sentences stay out of the history, and a reply that
+loses everything is asked for once more with a nudge (11 sentences dropped, 2 retries, 1 fallback
+"I lost my train of thought" in the last row). (2) Prompt: memory lines carry the user's name
+("Doston: is working on..."), the greeting says "You are Eva", and small brains get a tool note
+without "MUST include the function call". (3) `eva/toolgate.py`: a weather or time question is
+answered by the loop calling the tool itself before the brain speaks (city from the line, else the
+home city from memory); a wrong city is corrected. The second row shows why (3) is needed: with
+the softer tool note the 1B called the weather tool in 2 of 8 sessions and invented weather in
+others ("it's a sunny Saturday morning" against drizzle and 81 % rain).
+
+What it does not fix, from the same transcripts: coherence ("The tree is bigger than the house.",
+"It's really important to protect the tree, so I'm not sure if you'll be around."), help-desk
+lines (6 -> 11 of 56, up with the new tool note), and flat replies ("I'm not sure.", "I don't know.").
+The cloud 27B on the same voice was coherent throughout the owner's session. Brain size decides the
+sense; scaffolding decides whether what she says is checked against what she knows.
