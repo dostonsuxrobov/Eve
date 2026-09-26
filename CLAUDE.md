@@ -32,7 +32,8 @@ she *sounds and feels*. Measurements own what is *true*: latency, VRAM, credits,
 * **The plan:** Creator, billed annually, **paid through 2027-07-28**: 121k credits a month (the
   month turns on the 28th), unused credits roll over two months. v3 costs about 0.55 credits per
   character, v3 Conversational and Flash about half (the `character-cost` response header).
-  About 3-4 hours of conversation a month on v3, 6-8 on the others. `eva/credits.py` counts what
+  At the rate measured on the first test line that is about 5-7 hours of conversation a month on
+  v3 and 10-14 on the others (33-45k characters of her speech an hour); the meter will tell. `eva/credits.py` counts what
   every response reports into `usage.json`; the console shows it per turn and warns at 80 %.
 * **English only** (since 2026-09-23); the Russian persona and data are in the first archive.
 
