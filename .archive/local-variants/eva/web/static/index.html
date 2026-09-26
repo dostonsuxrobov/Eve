@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Eva</title>
+<style>
+  :root { color-scheme: dark; --bg:#0f1115; --fg:#e8e8ea; --dim:#8b8f98; --you:#7cc4ff; --eva:#9be79b; --warn:#ffcf6e; --err:#ff7a7a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.4 -apple-system, system-ui, Segoe UI, Roboto, sans-serif; height:100dvh; display:flex; flex-direction:column; }
+  header { padding: max(12px, env(safe-area-inset-top)) 16px 8px; display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  #status { color:var(--dim); font-size:14px; flex:1; }
+  #meter { width:44px; height:8px; background:#22252c; border-radius:4px; overflow:hidden; }
+  #meter i { display:block; height:100%; width:0; background:var(--you); transition: width .08s; }
+  #log { flex:1; overflow-y:auto; padding:8px 16px; -webkit-overflow-scrolling:touch; }
+  .line { margin:6px 0; white-space:pre-wrap; word-break:break-word; }
+  .you { color:var(--you); } .eva { color:var(--eva); } .dim { color:var(--dim); font-size:13px; } .warn { color:var(--warn); } .err { color:var(--err); }
+  footer { display:flex; gap:10px; padding:10px 16px max(14px, env(safe-area-inset-bottom)); }
+  button { flex:1; font-size:17px; padding:14px 10px; border:0; border-radius:12px; background:#2b2f3a; color:var(--fg); }
+  button.primary { background:#3b82f6; } button:disabled { opacity:.45; }
+  #speaking { display:none; }
+  #bar { display:flex; gap:14px; padding:0 16px 6px; font-size:12px; color:var(--dim); flex-wrap:wrap; }
+  #bar a { color:var(--dim); text-decoration:underline dotted; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Eva</h1>
+  <div id="status">tap Start</div>
+  <div id="meter"><i id="meterbar"></i></div>
+</header>
+<div id="bar">
+  <span id="stats">-</span>
+  <a id="aec" href="#">echo cancel: on</a>
+  <a id="buf" href="#">buffer: 350 ms</a>
+</div>
+<div id="log"></div>
+<footer>
+  <button id="start" class="primary">Start</button>
+  <button id="stop" disabled>Stop her</button>
+  <button id="end" disabled>End</button>
+</footer>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const log = $("log"), status = $("status"), meterbar = $("meterbar");
+  const startBtn = $("start"), stopBtn = $("stop"), endBtn = $("end");
+  let ws, ctx, micNode, playNode, stream, outRate = 24000, running = false, evaLine = null;
+  // switches live in the URL so a reload keeps them: ?aec=0 (no browser echo cancelling: the
+  // laptop's echo defences are used instead), ?buf=0.5 (seconds held before a reply starts)
+  const params = new URLSearchParams(location.search);
+  const AEC = params.get("aec") !== "0";
+  const BUF = Math.min(1.5, Math.max(0.1, parseFloat(params.get("buf") || "0.35")));
+  $("aec").textContent = "echo cancel: " + (AEC ? "on" : "off");
+  $("buf").textContent = "buffer: " + Math.round(BUF * 1000) + " ms";
+  $("aec").onclick = (e) => { e.preventDefault(); params.set("aec", AEC ? "0" : "1"); location.search = params.toString(); };
+  $("buf").onclick = (e) => { e.preventDefault(); const next = BUF < 0.3 ? 0.35 : BUF < 0.5 ? 0.6 : BUF < 0.9 ? 1.0 : 0.2; params.set("buf", String(next)); location.search = params.toString(); };
+  let rtt = null, lastStats = { queued: 0, underruns: 0, pre: 0 }, rtts = [], hold = BUF;
+  const AUTO = !params.get("buf");  // no explicit buffer: size the hold from the measured jitter
+  function showStats() {
+    $("stats").textContent = "buffer " + Math.round(lastStats.queued * 1000) + " ms (hold " + Math.round(hold * 1000) + (AUTO ? " auto" : "") + ")"
+      + " · drops " + lastStats.underruns + (rtt !== null ? " · rtt " + Math.round(rtt) + " ms" : "");
+  }
+  function adaptHold() {
+    // the hold covers the worst recent round-trip spread, twice, with a floor of 350 ms and a ceiling of 1.2 s
+    if (!AUTO || rtts.length < 3) return;
+    const jitter = Math.max(...rtts) - Math.min(...rtts);
+    const want = Math.min(1.2, Math.max(0.35, 0.35 + 2 * jitter / 1000));
+    if (Math.abs(want - hold) > 0.05 && playNode) { hold = want; playNode.port.postMessage({ prebuffer: hold }); showStats(); }
+  }
+
+  function line(cls, text) {
+    const el = document.createElement("div"); el.className = "line " + cls; el.textContent = text;
+    log.appendChild(el); log.scrollTop = log.scrollHeight; return el;
+  }
+  function setStatus(t) { status.textContent = t; }
+
+  // ---- worklets (inlined so this stays one file) ---------------------------------
+  const captureWorklet = `
+    class Cap extends AudioWorkletProcessor {
+      constructor() { super(); this.buf = new Float32Array(0); this.n = Math.round(sampleRate * 0.02); }
+      process(inputs) {
+        const ch = inputs[0] && inputs[0][0]; if (!ch) return true;
+        const merged = new Float32Array(this.buf.length + ch.length); merged.set(this.buf); merged.set(ch, this.buf.length);
+        let i = 0, peak = 0;
+        for (; i + this.n <= merged.length; i += this.n) {
+          const out = new Int16Array(this.n);
+          for (let k = 0; k < this.n; k++) { const v = Math.max(-1, Math.min(1, merged[i + k])); out[k] = v < 0 ? v * 32768 : v * 32767; if (Math.abs(v) > peak) peak = Math.abs(v); }
+          this.port.postMessage({ pcm: out.buffer, peak }, [out.buffer]);
+        }
+        this.buf = merged.slice(i); return true;
+      }
+    }
+    registerProcessor("cap", Cap);`;
+  const playWorklet = `
+    // Her audio arrives as 24 kHz int16 network messages. They are appended to ONE continuous ring
+    // buffer and resampled to the device rate here, sample by sample across message boundaries, so
+    // a boundary is never audible (resampling each message on its own left a click ~12x per second:
+    // the "bad line" heard on the phone). A jitter buffer on top: hold "pre" seconds before a reply
+    // starts and "re" seconds before resuming after running dry; "eot" or 400 ms without new data
+    // drains whatever is held. All counts below are in INPUT (24 kHz) samples.
+    class Play extends AudioWorkletProcessor {
+      constructor() { super();
+        this.inRate = 24000; this.cap = this.inRate * 30; this.buf = new Float32Array(this.cap);
+        this.w = 0; this.r = 0.0; this.consumed = 0;             // write count, fractional read position, samples played since flush
+        this.pre = 0.35 * this.inRate; this.re = 0.2 * this.inRate; this.need = this.pre; this.playing = false;
+        this.drain = false; this.lastData = 0; this.underruns = 0; this.lastStat = 0; this.tone = 0; this.lp = 0; this.last = 0;
+        this.port.onmessage = (e) => { const m = e.data;
+          if (m.flush) { this.port.postMessage({ stopped: true, played: Math.floor(this.consumed) }); this.r = this.w; this.consumed = 0; this.playing = false; this.need = this.pre; this.drain = false; }
+          else if (m.eot) { this.drain = true; }
+          else if (m.inRate) { this.inRate = m.inRate; }
+          else if (m.prebuffer !== undefined) { this.pre = m.prebuffer * this.inRate; this.re = Math.min(this.pre, 0.6 * this.pre); this.need = this.pre; }
+          else if (m.roomTone !== undefined) { this.tone = m.roomTone === null ? 0 : Math.pow(10, m.roomTone / 20) * 3.8; }
+          else if (m.pcm) { const a = new Int16Array(m.pcm);
+            if (this.w - this.r + a.length > this.cap) { this.r = this.w; }              // absurdly far behind: skip ahead
+            for (let k = 0; k < a.length; k++) { this.buf[this.w % this.cap] = a[k] / 32768; this.w++; }
+            this.lastData = currentTime; this.drain = false; } };
+      }
+      get queued() { return Math.max(0, this.w - this.r); }
+      process(inputs, outputs) {
+        const out = outputs[0][0]; const step = this.inRate / sampleRate; let i = 0;
+        if (!this.playing && this.queued > 0) {
+          const stale = currentTime - this.lastData > 0.4;
+          if (this.queued >= this.need || this.drain || stale) this.playing = true;
+        }
+        if (this.playing) {
+          for (; i < out.length; i++) {
+            if (this.w - this.r < 2) break;                                                   // need two samples to interpolate
+            const i0 = Math.floor(this.r), f = this.r - i0;
+            const a = this.buf[i0 % this.cap], b = this.buf[(i0 + 1) % this.cap];
+            out[i] = a + (b - a) * f; this.last = out[i]; this.r += step; this.consumed += step;
+          }
+          if (i < out.length) {                                                                // ran dry
+            if (this.drain) { this.playing = false; this.need = this.pre; this.drain = false; this.r = this.w; }   // the reply is over
+            else { this.playing = false; this.need = this.re; this.underruns++;                          // a hiccup: rebuffer briefly
+                   if (this.underruns % 3 === 0 && this.pre < 0.6 * this.inRate) this.pre *= 1.5;
+                   this.port.postMessage({ underrun: this.underruns }); }
+            // ease the last sample down instead of stepping to the floor
+            for (let k = 0; i < out.length && k < 64; i++, k++) { this.last *= 0.92; out[i] = this.last; }
+          }
+        }
+        for (; i < out.length; i++) { this.lp += 0.35 * ((Math.random() * 2 - 1) - this.lp); out[i] = this.lp * this.tone; }
+        if (currentTime - this.lastStat > 0.5) { this.lastStat = currentTime; this.port.postMessage({ stats: { queued: this.queued / this.inRate, underruns: this.underruns, pre: this.pre / this.inRate } }); }
+        return true;
+      }
+    }
+    registerProcessor("play", Play);`;
+  const blobUrl = (code) => URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
+
+
+  async function start() {
+    startBtn.disabled = true; setStatus("asking for the mic...");
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: AEC, noiseSuppression: AEC, autoGainControl: AEC, channelCount: 1 }, video: false });
+    } catch (e) { setStatus("mic blocked: " + e.message + (location.protocol === "http:" ? " (needs https)" : "")); startBtn.disabled = false; return; }
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    await ctx.resume();
+    await ctx.audioWorklet.addModule(blobUrl(captureWorklet));
+    await ctx.audioWorklet.addModule(blobUrl(playWorklet));
+    playNode = new AudioWorkletNode(ctx, "play", { numberOfInputs: 0, outputChannelCount: [1] });
+    playNode.connect(ctx.destination);
+    playNode.port.onmessage = (e) => {
+      if (e.data.stopped && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "stopped", played: e.data.played }));
+      if (e.data.underrun) setStatus("network hiccup (" + e.data.underrun + ")");
+      if (e.data.stats) { lastStats = e.data.stats; showStats(); }
+    };
+    const src = ctx.createMediaStreamSource(stream);
+    micNode = new AudioWorkletNode(ctx, "cap", { numberOfInputs: 1, numberOfOutputs: 0 });
+    src.connect(micNode);
+    const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+    setStatus("connecting to " + location.host + "...");
+    ws = new WebSocket(url); ws.binaryType = "arraybuffer";
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: "hello", sampleRate: ctx.sampleRate, ua: navigator.userAgent, aec: AEC, prebufferS: BUF }));
+      running = true; stopBtn.disabled = false; endBtn.disabled = false; setStatus("listening (mic " + ctx.sampleRate + " Hz)");
+      playNode.port.postMessage({ prebuffer: BUF });
+      setInterval(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ping", t: performance.now(), buffer_ms: Math.round(lastStats.queued * 1000), hold_ms: Math.round(hold * 1000), drops: lastStats.underruns, rtt_ms: rtt === null ? null : Math.round(rtt), aec: AEC })); }, 2000);
+      micNode.port.onmessage = (e) => { if (ws.readyState === 1) ws.send(e.data.pcm); meterbar.style.width = Math.min(100, e.data.peak * 300) + "%"; };
+    };
+    ws.onmessage = (e) => {
+      if (typeof e.data === "string") { onEvent(JSON.parse(e.data)); return; }
+      playNode.port.postMessage({ pcm: e.data }, [e.data]);  // raw 24 kHz int16; the worklet resamples continuously
+    };
+    ws.onclose = () => { running = false; setStatus("disconnected"); stopBtn.disabled = true; endBtn.disabled = true; startBtn.disabled = false; startBtn.textContent = "Reconnect"; if (stream) stream.getTracks().forEach(t => t.stop()); };
+    ws.onerror = () => setStatus("connection failed");
+  }
+
+  function onEvent(m) {
+    if (m.type === "config") { outRate = m.sampleRate; if (playNode) { playNode.port.postMessage({ inRate: m.sampleRate }); playNode.port.postMessage({ roomTone: m.roomToneDbfs === undefined ? null : m.roomToneDbfs }); if (m.prebufferS) playNode.port.postMessage({ prebuffer: m.prebufferS }); } return; }
+    if (m.type === "eot") { if (playNode) playNode.port.postMessage({ eot: true }); return; }
+    if (m.type === "pong") { rtt = performance.now() - m.t; rtts.push(rtt); if (rtts.length > 10) rtts.shift(); adaptHold(); showStats(); return; }
+    if (m.type === "stop") { playNode.port.postMessage({ flush: true }); return; }
+    if (m.type === "busy") { line("warn", "another client is connected; try again in a moment"); return; }
+    if (m.type !== "event") return;
+    const d = m.data || {};
+    switch (m.name) {
+      case "stt": line("you", "you: " + d.text); break;
+      case "turn": evaLine = null; line("eva", "eva: " + d.assistant_text + (d.interrupted ? "  [interrupted]" : "")); setStatus("listening"); break;
+      case "state": setStatus(d.to === "listening" ? "listening" : d.to === "thinking" ? "thinking..." : "speaking"); break;
+      case "filler": setStatus("mm..."); break;
+      case "barge_in": line("dim", "(interrupted her)"); break;
+      case "barge_in_echo": line("dim", "(hearing herself through your speaker, not stopping)"); break;
+      case "stt_echo": line("dim", "(her own voice through the mic, ignored)"); break;
+      case "stt_hesitation": line("dim", "(hesitation, waiting)"); break;
+      case "stt_phantom": line("dim", "(ignored as noise)"); break;
+      case "utterance_carried": line("dim", "(holding that, go on...)"); break;
+      case "language": line("dim", "(switching to " + d.lang + ")"); break;
+      case "stt_foreign": line("dim", "(heard as " + d.lang + ": probably misheard, staying in " + d.kept + ")"); break;
+      case "tool_call": line("dim", "tool: " + d.name + " " + JSON.stringify(d.arguments)); break;
+      case "failover": line("warn", d.kind + ": " + d.from + " not answering, using " + d.to); break;
+      case "recovered": line("dim", d.kind + ": " + d.name + " is back"); break;
+      case "echo_storm": line("warn", "the speaker keeps reaching the mic: for " + d.hold_s + " s only a full transcript can interrupt her. Try headphones."); break;
+      case "session_end": line("dim", "(she ended the call)"); break;
+      case "error": line("err", "error (" + d.where + "): " + d.error); break;
+    }
+  }
+
+  startBtn.onclick = start;
+  stopBtn.onclick = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "interrupt" })); };
+  endBtn.onclick = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "bye" })); };
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && ctx && ctx.state !== "running") ctx.resume(); });
+})();
+</script>
+</body>
+</html>

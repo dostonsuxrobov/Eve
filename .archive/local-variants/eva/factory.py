@@ -1,19 +1,16 @@
 """Build STT / LLM / TTS instances from a preset's config dicts.
 
-Imports are lazy so that optional heavy dependencies (sherpa-onnx, kokoro-onnx) are only
-loaded for the stack that needs them. The ears and the brain are local (Parakeet, Ollama); the
-voice is ElevenLabs, wrapped in ``eva.failover.FailoverTTS`` with Kokoro behind it when the
-preset names a fallback, so no internet or no credits means a local voice, not silence.
+Imports are lazy so that optional heavy dependencies (sherpa-onnx, kokoro-onnx) are
+only loaded for the stack that needs them. Everything is local: Parakeet on the CPU,
+brains in Ollama, Kokoro in-process or an expressive voice behind voice/server.py.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
-from .config import BRAINS, OLLAMA_BASE_URL, Preset, elevenlabs_key
+from .config import BRAINS, CEREBRAS_BASE_URL, OLLAMA_BASE_URL, VOICE_SERVER_URL, Preset, cerebras_key
 from .interfaces import LLM, STT, TTS
-
-EventHandler = Callable[[str, dict[str, Any]], None]
 
 
 def build_stt(cfg: dict[str, Any]) -> STT:
@@ -46,19 +43,26 @@ def build_llm(cfg: dict[str, Any]) -> LLM:
             temperature=cfg.get("temperature", 0.8),
             options=cfg.get("options"),
         )
+    if kind == "cerebras":
+        # the cloud era's client (eva/llm/openai_compat.py), for the owner's comparison
+        from .llm.openai_compat import OpenAICompatLLM
+
+        key = cerebras_key()
+        if not key:
+            raise RuntimeError("no Cerebras key: put it in cerebras_api_key.txt or CEREBRAS_API_KEY")
+        model = cfg["model"]
+        reasoning = cfg.get("reasoning")
+        # qwen with reasoning off truncated 25-40 % of very short replies mid-word; "low" didn't (archived eval)
+        extra: dict[str, Any] = {"disable_reasoning": True} if reasoning in (None, "none", "off", False) else {"reasoning_effort": reasoning}
+        return OpenAICompatLLM(
+            name=f"cerebras/{model}", base_url=cfg.get("base_url", CEREBRAS_BASE_URL), api_key=key, model=model,
+            extra_body=extra, max_tokens=cfg.get("max_tokens", 800), temperature=cfg.get("temperature", 0.8),
+        )
     raise ValueError(f"unknown llm kind {kind!r}")
 
 
 def build_tts(cfg: dict[str, Any]) -> TTS:
     kind = cfg["kind"]
-    if kind == "elevenlabs":
-        from .tts.elevenlabs import ElevenLabsTTS
-
-        key = elevenlabs_key()
-        if not key:
-            raise RuntimeError("no ElevenLabs key: put it in elevenlabs_key.txt or ELEVENLABS_API_KEY")
-        return ElevenLabsTTS(api_key=key, voice_id=cfg["voice"], model_id=cfg["model_id"],
-                             **({"level_dbfs": cfg["level_dbfs"]} if "level_dbfs" in cfg else {}))
     if kind == "kokoro":
         from .tts.kokoro_local import KokoroTTS
 
@@ -69,6 +73,10 @@ def build_tts(cfg: dict[str, Any]) -> TTS:
             intra_threads=cfg.get("intra_threads"),
             lang=cfg.get("lang", "en-us"),
         )
+    if kind == "voice-server":
+        from .tts.voice_server import VoiceServerTTS
+
+        return VoiceServerTTS(engine=cfg["engine"], voice=cfg["voice"], base_url=cfg.get("base_url", VOICE_SERVER_URL))
     raise ValueError(f"unknown tts kind {kind!r}")
 
 
@@ -77,7 +85,6 @@ class Stack:
     stt: STT
     llm: LLM
     tts: TTS
-    voice: Any = None  # the primary (cloud) voice under any failover wrapper, for the credit meter
 
 
 def build_stack(
@@ -86,18 +93,12 @@ def build_stack(
     brain: str | None = None,
     stt_overrides: dict[str, Any] | None = None,
     tts_overrides: dict[str, Any] | None = None,
-    on_event: EventHandler | None = None,
 ) -> Stack:
-    """Build a preset's three providers; the voice gets its local fallback when the preset names one."""
+    """Build a preset's three providers. ``brain`` picks an entry of ``config.BRAINS``
+    instead of the preset's LLM; the overrides are merged into the provider configs."""
     stt_cfg = {**preset.stt, **(stt_overrides or {})}
     llm_cfg = {k: v for k, v in BRAINS[brain].items() if k not in ("label", "persona")} if brain else dict(preset.llm)
-    for flag in ("tools", "tool_gate"):
-        llm_cfg.pop(flag, None)
+    llm_cfg.pop("tools", None)
+    llm_cfg.pop("tool_gate", None)
     tts_cfg = {**preset.tts, **(tts_overrides or {})}
-    voice = build_tts(tts_cfg)
-    tts: TTS = voice
-    if preset.tts_fallback and preset.tts_fallback["kind"] != tts_cfg["kind"]:
-        from .failover import FailoverTTS
-
-        tts = FailoverTTS(voice, build_tts(preset.tts_fallback), on_event=on_event)
-    return Stack(stt=build_stt(stt_cfg), llm=build_llm(llm_cfg), tts=tts, voice=voice)
+    return Stack(stt=build_stt(stt_cfg), llm=build_llm(llm_cfg), tts=build_tts(tts_cfg))

@@ -50,47 +50,45 @@ def test_default_session_is_english_only() -> None:
 
 
 # ------------------------------------------------------------------ variants
-def test_every_voice_builds_with_the_right_prompt(tmp_path: Path) -> None:
-    """v3 / v3 Conversational get cues and sounds, Flash cues only (as voice settings), Kokoro
-    nothing; the cloud voices have Kokoro behind them and a credit meter; the 4B gets the
-    small-brain scaffolding."""
-    from eva.config import VOICES, make_preset
+def test_every_brain_and_voice_builds(tmp_path: Path) -> None:
+    """Each brain x voice makes a session; the prompt offers exactly what the voice renders,
+    and a brain without tools in its Ollama template gets none."""
+    from eva.config import BRAINS, VOICES, cerebras_key, make_preset
     from eva.session import build_session
 
-    for voice in VOICES:
-        s = build_session(make_preset("qwen4b", voice), memory_path=tmp_path / "m.json")
-        prompt = s.system_prompt
-        assert s.speech_guard is not None and s.tool_router is not None
-        if voice in ("v3", "v3conv"):
-            assert "Sounds are allowed" in prompt and s.tts.supports_audio_tags
-        elif voice == "flash":
-            assert "Never write sound tags" in prompt and not s.tts.supports_audio_tags
-        else:
-            assert "Never write bracketed stage directions" in prompt
-        cloud = VOICES[voice]["kind"] == "elevenlabs"
-        assert (s.credit_meter is not None) == cloud
-        assert (type(s.tts).__name__ == "FailoverTTS") == cloud, type(s.tts).__name__
+    for brain in BRAINS:
+        if BRAINS[brain]["kind"] == "cerebras" and not cerebras_key():
+            continue  # the cloud comparison brain needs its key; everything else is offline
+        for voice in VOICES:
+            s = build_session(make_preset(brain, voice), memory_path=tmp_path / "m.json")
+            assert s.persona.name == BRAINS[brain].get("persona", "eva")
+            assert bool(s.tools) == BRAINS[brain].get("tools", True), brain
+            prompt = s.system_prompt
+            if voice.startswith("orpheus"):
+                assert "[laughs] [chuckles] [sighs] [gasps]" in prompt and "mood cue" not in prompt
+            elif voice == "chatterbox-turbo":
+                assert "[laughs] [chuckles]" in prompt and "[sighs]" not in prompt
+            elif voice == "chatterbox":
+                assert "[excited]" in prompt and "Never write sound tags" in prompt
+            else:
+                assert "Never write bracketed stage directions" in prompt
+    assert "No tools are connected right now." in build_session(make_preset("gemma1b", "kokoro"), memory_path=tmp_path / "m.json").system_prompt
 
 
-def test_credit_meter_months_and_totals(tmp_path: Path) -> None:
-    """The plan's month turns on the 28th; what the headers report is added up and saved."""
-    from datetime import date
+def test_voice_server_text_and_cues() -> None:
+    """Eva's generic sounds become each engine's spelling; anything else in brackets goes;
+    her cue becomes Chatterbox's emotion strength."""
+    from eva.tts.voice_server import ENGINES, VoiceServerTTS, engine_text
 
-    from eva.credits import CreditMeter, billing_month
-
-    assert billing_month(date(2026, 9, 26)) == "2026-08-28"
-    assert billing_month(date(2026, 9, 28)) == "2026-09-28"
-    assert billing_month(date(2027, 1, 5)) == "2026-12-28"
-    path = tmp_path / "usage.json"
-    m = CreditMeter(path=path, monthly=1000, month="2026-09-28")
-    m.add("eleven_v3", 64, 35)
-    m.add("eleven_flash_v2_5", 64, None)  # no header: the characters count
-    assert m.session_credits == 99 and m.turn_spent() == 99 and m.turn_spent() == 0
-    m.add("eleven_v3", 1000, 750)
-    assert m.warn and "849 of 1,000" in m.line()
-    m.save()
-    again = CreditMeter(path=path, monthly=1000, month="2026-09-28")
-    assert again.month_credits == 849 and again.session_credits == 0
+    assert engine_text("Ha. [laughs] Okay [whispers] fine [sighs].", ENGINES["orpheus"]["sounds"]) == "Ha. <laugh> Okay fine <sigh>."
+    assert engine_text("Ha [Laughs] and [sighs] ok", ENGINES["chatterbox-turbo"]["sounds"]) == "Ha [laugh] and ok"
+    assert engine_text("[warm] Hey there.", {}) == "Hey there."
+    cb = VoiceServerTTS("chatterbox", "eva")
+    assert cb.supports_cues and not cb.supports_audio_tags
+    assert cb.params_for("excited")["exaggeration"] > cb.params_for("soft")["exaggeration"]
+    assert cb.params_for("nonsense") == {} and cb.params_for(None) == {}
+    orpheus = VoiceServerTTS("orpheus", "tara")
+    assert orpheus.supports_audio_tags and not orpheus.supports_cues and orpheus.params_for("excited") == {}
 
 
 # ------------------------------------------------------------------- delivery

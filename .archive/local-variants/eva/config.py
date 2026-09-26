@@ -1,14 +1,12 @@
-"""Paths, turn-taking settings, the brain, the voices and the ElevenLabs plan.
+"""Paths, turn-taking settings, and the two tables a variant is made of: brains and voices.
 
-The setup chosen on 2026-09-26 (owner): the brain and the ears on this laptop (Ollama 4B,
-Parakeet), the voice from ElevenLabs on the owner's prepaid Creator plan. The voice was the
-bottleneck of the fully local build (Chatterbox took 2.3-3.4 s to its first sound on the 6 GB
-GPU); the brain costs 0.1-0.4 s at any size. Kokoro stays as the local voice and the automatic
-fallback when ElevenLabs can't answer (no internet, credits spent).
+Everything runs on this laptop (CLAUDE.md, 2026-09-25). A variant is one brain (an Ollama
+model) and one voice (Kokoro in-process, or an expressive model behind the local voice
+server, ``voice/server.py`` in ``.venv-voice``). ``run.py --brain X --voice Y`` picks one;
+with neither it shows both lists.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,30 +16,26 @@ MODELS_DIR = ROOT / "models"
 SAMPLES_DIR = ROOT / "samples"
 MEMORY_FILE = ROOT / "memory.json"
 NOTES_FILE = ROOT / "notes.json"  # eva.tools remember_note / recall_notes
-USAGE_FILE = ROOT / "usage.json"  # ElevenLabs credits spent, per billing month (eva.credits)
+VOICE_REFS_DIR = ROOT / "eva" / "assets" / "voices"  # reference clips for voice cloning
 
-USER_AGENT = "eva-voice-agent/0.3"
+USER_AGENT = "eva-voice-agent/0.2"
 
 # On this Windows box `localhost` resolves to ::1 first and costs ~2 s per request
 # before falling back. Always use the IPv4 literal.
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
-
-# ElevenLabs, owner's plan (2026-09-26): Creator, billed annually, paid through 2027-07-28.
-# 121k credits a month; unused credits roll over for up to two months (balance at most 3x).
-# The key only has text_to_speech / speech_to_text (no models_read, voices_read, user_read),
-# so the balance can't be read from the API: eva.credits counts what the responses report.
-ELEVENLABS_VOICE = "bD9maNcCuQQS75DGuteM"  # the owner's pick, 2026-09-26
-PLAN_MONTHLY_CREDITS = 121_000
-PLAN_RENEWS_ON_DAY = 28  # the subscription date (2027-07-28): each month's credits arrive on the 28th
-PLAN_EXPIRES = "2027-07-28"
-CREDITS_WARN_AT = 0.8  # of the month's allowance
+VOICE_SERVER_URL = "http://127.0.0.1:8765"
+# The one cloud brain, for the owner's comparison (2026-09-26): Cerebras sits behind Cloudflare
+# and returns 403 (error 1010) for default python user agents, hence USER_AGENT. The key lives in
+# the gitignored cerebras_api_key.txt (or CEREBRAS_API_KEY); quotas are small, so no benchmarks on it.
+CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 
 
-def elevenlabs_key() -> str | None:
-    """From ELEVENLABS_API_KEY or the gitignored elevenlabs_key.txt."""
-    if os.environ.get("ELEVENLABS_API_KEY"):
-        return os.environ["ELEVENLABS_API_KEY"].strip()
-    path = ROOT / "elevenlabs_key.txt"
+def cerebras_key() -> str | None:
+    import os
+
+    if os.environ.get("CEREBRAS_API_KEY"):
+        return os.environ["CEREBRAS_API_KEY"].strip()
+    path = ROOT / "cerebras_api_key.txt"
     return path.read_text(encoding="utf-8").strip() if path.exists() else None
 
 
@@ -109,44 +103,59 @@ class PipelineSettings:
 
 
 
-# The brain: Qwen3 4B instruct on Ollama, with the small-brain scaffolding (eva/toolgate.py tool
-# gate and routed questions, eva/guard.py speech guard): the 4B has the same failure classes as
-# the 1B in the bench ("One sec, setting that timer" without a call, a call written as text).
+# Brains: Ollama models, measured in docs/MEASUREMENTS.md (2026-09-25; "GPU" is nvidia-smi
+# with the model loaded at an 8k context). Models of 2.5B and under get the short persona:
+# on the full one they rambled, looped on "mm" or slid into a help-desk voice. "tools": False
+# for a model whose Ollama template has none (Ollama refuses the request otherwise); "think":
+# None for a model without a thinking mode (Ollama refuses the field).
 BRAINS: dict[str, dict[str, Any]] = {
-    "qwen4b": {"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M", "persona": "eva", "tool_gate": True,
-               "label": "Qwen3 4B instruct, on this laptop (3.2 GB on the GPU, 56 tok/s)"},
+    "qwen4b": {"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M", "persona": "eva",
+               "label": "Qwen3 4B: fewest rule breaks in the bench (7/41); 3.2 GB, 56 tok/s, tools 4/6"},
+    # Cloud, for comparison only (owner, 2026-09-26): the cloud era's brain, 6.2/10 in its eval, 6/6
+    # tools, 0.2-0.4 s to the first token over the network. No VRAM: the voice gets the whole GPU.
+    "qwen27b": {"kind": "cerebras", "model": "qwen-3.8-27b", "reasoning": "low", "max_tokens": 800, "persona": "eva",
+                "label": "CLOUD Cerebras qwen-3.8-27b (comparison): the cloud era's brain, no VRAM, uses the API quota"},
+    "qwen2b": {"kind": "ollama", "model": "qwen3.5:2b-q4_K_M", "persona": "eva_small", "tool_gate": True,
+               "label": "Qwen 3.5 2B: 2.4 GB, 99 tok/s, rambles (51 words), tools 3/6"},
+    "minicpm2b": {"kind": "ollama", "model": "openbmb/minicpm5-2b", "persona": "eva_small", "tool_gate": True,
+                  "label": "MiniCPM5 2B: 1.7 GB, 92 tok/s, rambles (50 words), tools 3/6"},
+    "lfm1b": {"kind": "ollama", "model": "LiquidAI/lfm2.5-1.2b-instruct:q8_0", "persona": "eva_small", "tool_gate": True,
+              "label": "LFM2.5 1.2B: 1.4 GB, 123 tok/s, help-desk register, tools 2/6"},
+    "minicpm1b": {"kind": "ollama", "model": "openbmb/minicpm5:q8_0", "persona": "eva_small", "tool_gate": True,
+                  "label": "MiniCPM5 1B: 1.2 GB, 142 tok/s, best small tool caller (4/6), loops on 'mm'"},
+    "gemma1b": {"kind": "ollama", "model": "gemma3:1b-it-qat", "persona": "eva_small", "tool_gate": True, "tools": False, "think": None,
+                "label": "Gemma 3 1B: 1.2 GB, 123 tok/s, no tools"},
+    "qwen08b": {"kind": "ollama", "model": "qwen3.5:0.8b", "persona": "eva_small", "tool_gate": True,
+                "label": "Qwen 3.5 0.8B: 1.4 GB, 132 tok/s, often incoherent"},
 }
-DEFAULT_BRAIN = "qwen4b"
+DEFAULT_BRAIN = "minicpm1b"
 
-# The voices. ElevenLabs on the owner's voice; measured 2026-09-26 on one 64-character line:
-# first audio v3 0.72 s, v3 Conversational 0.31 s, Flash v2.5 0.47 s (cold connections), billed
-# 35 / 17 / 17 credits (the response's character-cost header). There is no "Flash v3".
+# Voices. "voice-server" voices run in .venv-voice (PyTorch + CUDA) behind voice/server.py,
+# which run.py starts on demand. Orpheus generates its audio tokens in Ollama next to the
+# brain (2.1 GB at a 2k context) and the server decodes them with SNAC on the CPU; Chatterbox
+# clones the reference clip in eva/assets/voices/ (PyTorch on the GPU: Turbo 3.1 GB reserved,
+# the 0.5B model 3.6 GB, plus ~0.3 GB of CUDA context). Brain + voice must stay under ~5.7 GB
+# of the 6 GB card, or Windows spills into system RAM and everything slows ~20x (eva/gpu.py).
 VOICES: dict[str, dict[str, Any]] = {
-    "v3": {"kind": "elevenlabs", "model_id": "eleven_v3", "voice": ELEVENLABS_VOICE,
-           "label": "ElevenLabs v3: the most expressive, audio tags; ~0.7 s to first audio"},
-    "v3conv": {"kind": "elevenlabs", "model_id": "eleven_v3_conversational", "voice": ELEVENLABS_VOICE,
-               "label": "ElevenLabs v3 Conversational: v3's tags, faster (~0.3 s), half the credits"},
-    "flash": {"kind": "elevenlabs", "model_id": "eleven_flash_v2_5", "voice": ELEVENLABS_VOICE,
-              "label": "ElevenLabs Flash v2.5: the fastest, half the credits, no audio tags"},
-    "kokoro": {"kind": "kokoro", "voice": "af_heart", "label": "Kokoro, on this laptop: no credits, flat"},
+    "kokoro": {"kind": "kokoro", "voice": "af_heart", "label": "Kokoro af_heart: fast, on the CPU, flat"},
+    **{
+        f"orpheus-{name}": {"kind": "voice-server", "engine": "orpheus", "voice": name,
+                            "label": f"Orpheus 3B '{name}': laughs, sighs, gasps inline; 2.1 GB; ~1.1-1.8 s to first sound"}
+        for name in ("tara", "leah", "jess", "mia", "zoe")
+    },
+    "chatterbox-turbo": {"kind": "voice-server", "engine": "chatterbox-turbo", "voice": "eva",
+                         "label": "Chatterbox Turbo 350M: cloned voice, laughs; 3.4 GB (1B brains only); ~1 s a sentence"},
+    "chatterbox": {"kind": "voice-server", "engine": "chatterbox", "voice": "eva",
+                   "label": "Chatterbox 0.5B: cloned voice, emotion strength follows her cue; 3.9 GB (1B brains only); slow"},
 }
-DEFAULT_VOICE = "v3"
+DEFAULT_VOICE = "orpheus-tara"
 
 LOCAL_STT: dict[str, Any] = {"kind": "parakeet"}
-LOCAL_TTS: dict[str, Any] = {"kind": "kokoro", "voice": "af_heart"}  # the fallback voice
-
-# The cloud era's tuned turn-taking for the ElevenLabs voice (the setup that felt right, archived
-# config _MAYA_SETTINGS), plus one change: render one sentence ahead, not two, so an interruption
-# wastes at most one unheard sentence of credits.
-ELEVENLABS_SETTINGS = PipelineSettings(
-    endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
-    first_chunk_min_chars=40, min_chunk_chars=20, tts_parallelism=1,
-)
 
 
 @dataclass
 class Preset:
-    """One runnable stack: speech-to-text, a brain, a voice (and its fallback), a persona, settings."""
+    """One runnable stack: speech-to-text, a brain, a voice, a persona, the turn-taking settings."""
 
     name: str
     description: str
@@ -155,7 +164,6 @@ class Preset:
     tts: dict[str, Any]
     persona: str = "eva"
     settings: PipelineSettings = field(default_factory=PipelineSettings)
-    tts_fallback: dict[str, Any] | None = None
 
 
 def make_preset(brain: str = DEFAULT_BRAIN, voice: str = DEFAULT_VOICE) -> Preset:
@@ -163,7 +171,6 @@ def make_preset(brain: str = DEFAULT_BRAIN, voice: str = DEFAULT_VOICE) -> Prese
     b, v = BRAINS[brain], VOICES[voice]
     llm = {k: val for k, val in b.items() if k not in ("label", "persona")}
     tts = {k: val for k, val in v.items() if k != "label"}
-    cloud = v["kind"] == "elevenlabs"
     return Preset(
         name=f"{brain}+{voice}",
         description=f"Parakeet STT, {b['label']}; voice {v['label']}.",
@@ -171,6 +178,4 @@ def make_preset(brain: str = DEFAULT_BRAIN, voice: str = DEFAULT_VOICE) -> Prese
         llm=llm,
         tts=tts,
         persona=b.get("persona", "eva"),
-        settings=ELEVENLABS_SETTINGS if cloud else PipelineSettings(),
-        tts_fallback=dict(LOCAL_TTS) if cloud else None,
     )

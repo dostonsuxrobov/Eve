@@ -48,7 +48,6 @@ class Session:
     speech_guard: SpeechGuard | None = None
     tool_args: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
     tool_router: Callable[[str], list[tuple[str, dict[str, Any]]]] | None = None
-    credit_meter: Any = None  # eva.credits.CreditMeter when the voice is ElevenLabs
 
     def agent_kwargs(self) -> dict[str, Any]:
         """The scaffolding every VoiceAgent of this session gets (run.py, the phone client, the benches)."""
@@ -102,13 +101,7 @@ def build_session(
     """
     plan = lang_plan(lang)
     tts_overrides: dict[str, Any] = {"voice": voice} if voice else {}
-    stack = build_stack(preset, brain=brain, tts_overrides=tts_overrides, on_event=on_event)
-    meter = None
-    if hasattr(stack.voice, "meter"):  # a cloud voice: count its credits (eva.credits)
-        from .credits import CreditMeter
-
-        meter = CreditMeter()
-        stack.voice.meter = meter
+    stack = build_stack(preset, brain=brain, tts_overrides=tts_overrides)
 
     persona_obj = load_persona(persona or preset.persona, lang=plan.persona_lang)
     memory = Memory(memory_path)
@@ -153,7 +146,6 @@ def build_session(
                                  known=memory.as_prompt_text().lower()) if gated else None,
         tool_args=gate.fix_args if gate else None,
         tool_router=gate.route if gate else None,
-        credit_meter=meter,
     )
 
 

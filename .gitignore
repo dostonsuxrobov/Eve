@@ -16,4 +16,5 @@ notes.json
 openAI_api.txt
 *api*.txt
 !eva/assets/voices/*.wav
-voice/server.log
+**/voice/server.log
+usage.json

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Replay real conversations through the real loop and count how the brain fails.
 
-    .venv/Scripts/python.exe bench/replay.py                          # the 4B brain, 8 sessions
-    .venv/Scripts/python.exe bench/replay.py --sessions 4 --voice flash   # Flash's prompt rules
+    .venv/Scripts/python.exe bench/replay.py                          # minicpm1b, 8 sessions
+    .venv/Scripts/python.exe bench/replay.py --brain qwen2b --sessions 5
 
 The user's lines (from the owner's live sessions) go through ``VoiceAgent`` exactly as typed
 turns do: the session's persona, memory (a copy, never saved), tool gate, sanitizer and
@@ -39,8 +39,10 @@ sys.path.insert(0, str(ROOT))
 from eva.config import BRAINS, make_preset  # noqa: E402
 from eva.mocks import EventLog, MockPlayer, MockSTT, MockTTS  # noqa: E402
 from eva.pipeline import VoiceAgent  # noqa: E402
-from eva.guard import PROMISE_RE  # noqa: E402
 from eva.session import build_session  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "bench"))
+from common import PROMISE_RE  # noqa: E402
 
 OUT = ROOT / "bench" / "out"
 
@@ -105,11 +107,8 @@ def check(reply: str, earlier: list[str], user_name: str, calls: list[dict[str, 
     return flags
 
 
-async def one_session(brain: str, voice: str, memory: Path, user_name: str, scaffold: bool = True) -> list[dict[str, Any]]:
-    preset = make_preset(brain, voice)
-    if not scaffold:  # the baseline: no tool gate, speech guard, routed questions or gated tool note
-        preset.llm.pop("tool_gate", None)
-    s = build_session(preset, user_name=user_name, memory_path=memory)
+async def one_session(brain: str, voice: str, memory: Path, user_name: str) -> list[dict[str, Any]]:
+    s = build_session(make_preset(brain, voice), user_name=user_name, memory_path=memory)
     tts = RecordingTTS()
     calls: list[dict[str, Any]] = []
 
@@ -154,7 +153,7 @@ async def amain(args: argparse.Namespace) -> int:
     shutil.copy(ROOT / "memory.json", memory)  # her real memory, read only: a copy is what gets touched
     sessions = []
     for i in range(args.sessions):
-        replies = await one_session(args.brain, args.voice, memory, args.user_name, scaffold=not args.no_scaffold)
+        replies = await one_session(args.brain, args.voice, memory, args.user_name)
         sessions.append(replies)
         bad = sum(1 for r in replies if r["flags"])
         print(f"session {i + 1}: {bad}/{len(replies)} replies flagged " + " | ".join(
@@ -169,7 +168,7 @@ async def amain(args: argparse.Namespace) -> int:
     n_silent = sum(1 for ses in sessions for r in ses if not r["spoken"])
     print(f"guard: {n_dropped} sentences dropped, {n_retried} replies retried, {n_silent} replies with nothing spoken")
     OUT.mkdir(parents=True, exist_ok=True)
-    out = OUT / f"replay_{args.brain}{'_noscaffold' if args.no_scaffold else ''}.json"
+    out = OUT / f"replay_{args.brain}.json"
     out.write_text(json.dumps({"brain": args.brain, "voice": args.voice, "counts": counts, "flagged": any_bad,
                                "replies": total, "sessions": sessions}, indent=1, ensure_ascii=False), encoding="utf-8")
     print(f"wrote {out}")
@@ -178,11 +177,10 @@ async def amain(args: argparse.Namespace) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--brain", default="qwen4b", choices=[b for b, c in BRAINS.items() if c["kind"] == "ollama"])
-    ap.add_argument("--voice", default="v3", help="decides the persona's delivery rules (the voice itself is silent here: no credits)")
+    ap.add_argument("--brain", default="minicpm1b", choices=[b for b, c in BRAINS.items() if c["kind"] == "ollama"])
+    ap.add_argument("--voice", default="chatterbox", help="decides the persona's delivery rules (the voice itself is silent here)")
     ap.add_argument("--sessions", type=int, default=8)
     ap.add_argument("--user-name", default="Doston")
-    ap.add_argument("--no-scaffold", action="store_true", help="the baseline: the brain without the small-brain scaffolding")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     return asyncio.run(amain(args))

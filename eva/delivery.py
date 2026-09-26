@@ -46,7 +46,7 @@ NONVERBAL_TAGS: frozenset[str] = frozenset(
         "laughs", "laughing", "chuckles", "giggles", "sighs", "exhales", "gasps", "whispers",
         "pause", "short pause", "long pause", "clears throat", "sniffs", "snorts", "hums",
         "mischievously", "sarcastic", "crying", "yawns",
-        "groans", "coughs", "sniffles",  # Orpheus renders these too (eva/tts/voice_server.py)
+        "groans", "coughs", "sniffles",
     }
 )
 

@@ -11,8 +11,8 @@ The behavioural test suite on doubles lives in ``tests/`` (``python -m pytest te
 
 Examples::
 
-    .venv/Scripts/python.exe bench/e2e_sim.py --voice v3            # spends a few hundred ElevenLabs credits
-    .venv/Scripts/python.exe bench/e2e_sim.py --voice kokoro --utterances samples/user_hello.wav,samples/user_task.wav --barge-in-at 1.2
+    .venv/Scripts/python.exe bench/e2e_sim.py --brain minicpm1b --voice orpheus-tara
+    .venv/Scripts/python.exe bench/e2e_sim.py --brain qwen2b --voice kokoro --utterances samples/user_hello.wav,samples/user_task.wav --barge-in-at 1.2
 """
 from __future__ import annotations
 
@@ -233,9 +233,6 @@ async def run_real(args: argparse.Namespace) -> int:
         await asyncio.gather(stt.close(), llm.close(), tts.close(), return_exceptions=True)
 
     print_turn_table(f"e2e {preset.name}", _turn_rows(turns))
-    if session.credit_meter is not None:  # real credits were spent: they count toward the month
-        session.credit_meter.save()
-        console.print(session.credit_meter.line())
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out = Path(args.out) if args.out else OUT_DIR / f"e2e_{preset.name}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

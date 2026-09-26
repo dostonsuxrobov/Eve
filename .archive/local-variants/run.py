@@ -2,7 +2,7 @@
 """Eva CLI - talk to the voice agent. Everything runs on this laptop.
 
     .venv/Scripts/python.exe run.py --user-name Doston            # pick a brain and a voice from the lists
-    .venv/Scripts/python.exe run.py --voice v3 --user-name Doston   # or v3conv / flash (half the credits) / kokoro (local)
+    .venv/Scripts/python.exe run.py --brain minicpm1b --voice orpheus-tara --user-name Doston
     .venv/Scripts/python.exe run.py --list                        # every brain and voice
     .venv/Scripts/python.exe run.py --web --tls                   # talk from your phone: https://<laptop-ip>:8443
     .venv/Scripts/python.exe run.py --list-devices
@@ -71,7 +71,6 @@ class StatusPrinter:
     def __init__(self, debug: bool = False) -> None:
         self.debug = debug
         self.t0 = time.perf_counter()
-        self.meter: Any = None  # eva.credits.CreditMeter, set once the session exists
 
     def __call__(self, name: str, data: dict[str, Any]) -> None:
         if name == "listening":
@@ -174,9 +173,6 @@ class StatusPrinter:
             )
             if data.get("error"):
                 console.print(f"[red]  error: {escape(str(data['error']))}[/]")
-            if self.meter is not None:
-                m = self.meter
-                console.print(f"[dim]  credits +{m.turn_spent():,} (session {m.session_credits:,}, month {m.month_credits:,} of {m.monthly:,})[/]")
             console.print("[dim]listening...[/]")
         elif name == "error":
             console.print(f"[red]error ({data.get('where')}): {escape(str(data.get('error')))}[/]")
@@ -264,9 +260,6 @@ async def amain(args: argparse.Namespace) -> int:
         preset, lang=args.lang, persona=args.persona, user_name=args.user_name or "",
         mute_fillers=args.mute_fillers, on_event=printer,
     )
-    printer.meter = session.credit_meter
-    if session.credit_meter is not None:
-        console.print(f"[dim]{session.credit_meter.line()}[/]")
     stt, llm, tts = session.stt, session.llm, session.tts
     plan, memory = session.plan, session.memory
     if session.dropped_facts:
@@ -293,7 +286,6 @@ async def amain(args: argparse.Namespace) -> int:
         finally:
             console.print("\n[dim]stopping the server...[/]")
             await asyncio.gather(stt.close(), llm.close(), tts.close(), return_exceptions=True)
-            _close_meter(session.credit_meter)
             console.print("[dim]bye.[/]")
         return 0
     if not args.text:
@@ -329,8 +321,8 @@ async def amain(args: argparse.Namespace) -> int:
     from eva.gpu import GPU_TOTAL_MIB, GPU_WARN_MIB, free_ollama, gpu_used_mib, on_battery
 
     if on_battery():
-        console.print("[yellow]on battery: Windows caps the GPU at 50 W (101 W plugged in); the local brain runs"
-                      " slower. Plug in for full speed.[/]")
+        console.print("[yellow]on battery: Windows caps the GPU at 50 W, and the voice runs about a third slower"
+                      " (measured). Plug in for full speed.[/]")
 
     freed = free_ollama(session.ollama_models)
     if freed:
@@ -427,20 +419,8 @@ async def amain(args: argparse.Namespace) -> int:
         except Exception:
             pass
         await asyncio.gather(stt.close(), llm.close(), tts.close(), return_exceptions=True)
-        _close_meter(session.credit_meter)
         console.print("[dim]bye.[/]")
     return 0
-
-
-def _close_meter(meter: Any) -> None:
-    """Save the credits spent and say where the month stands."""
-    if meter is None:
-        return
-    meter.save()
-    style = "yellow" if meter.warn else "dim"
-    console.print(f"[{style}]{meter.line()}[/]")
-    if meter.warn:
-        console.print("[yellow]past 80 % of this month's ElevenLabs credits: v3conv or flash cost half, kokoro nothing[/]")
 
 
 async def text_session(agent: Any) -> None:
