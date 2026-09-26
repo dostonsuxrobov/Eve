@@ -366,6 +366,13 @@ def test_router_answers_plain_questions_itself() -> None:
     assert g.route("What time is it?") == [("get_current_time", {})]
     assert g.route("What's the difference between the tree and the house?") == []
     assert ToolGate().route("Is it going to rain?") == []  # no home city known: the brain asks
+    assert g.route("Is it going to rain today?") == [("get_weather", {"city": "Philadelphia"})]
+    assert g.route("Do I need an umbrella?") == [("get_weather", {"city": "Philadelphia"})]
+    # mentions, not requests (owner's session, 2026-09-26): the first router looked these up
+    for line in ("Yeah, it is. Very nice day. Raining outside. I love it.", "What do you know about the rain?",
+                 "Hell, um what do you think is the difference between the weather and the Climate.",
+                 "It's been a long time since I felt this good."):
+        assert g.route(line) == [], line
 
 
 def test_guard_drops_thinking_out_loud() -> None:

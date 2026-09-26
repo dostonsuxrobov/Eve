@@ -31,6 +31,21 @@ TRIGGERS: dict[str, re.Pattern[str]] = {
         "open_url": r"\b(open|website|youtube|browser|site|link|google)\b",
     }.items()
 }
+# The loop looks something up itself only for a request, not for a mention: the first router
+# fired on "Raining outside. I love it.", "What do you know about the rain?" and "the difference
+# between the weather and the climate", added ~0.9 s each and steered the brain onto the
+# forecast (owner's session, 2026-09-26). Offering the tool (TRIGGERS) stays generous.
+ROUTES: dict[str, re.Pattern[str]] = {
+    "get_weather": re.compile(
+        r"\b(what'?s|what is|how'?s|how is) the (weather|forecast)\b|\b(check|tell me|look up|get) the (weather|forecast)\b|"
+        r"\bweather (like|today|tonight|tomorrow|outside|right now|this (morning|afternoon|evening|week))\b|"
+        r"\b(is|will) it (going to |gonna )?(rain|snow|be (cold|hot|warm|sunny|windy))\b|\bdo i need (an umbrella|a jacket|a coat)\b|"
+        r"\bhow (cold|hot|warm) is it\b",
+        re.IGNORECASE),
+    "get_current_time": re.compile(
+        r"\bwhat time is it\b|\bwhat'?s the time\b|\btell me the time\b|\bwhat (day|date) is (it|today)\b|\bwhat'?s the date\b",
+        re.IGNORECASE),
+}
 _CITY_RE = re.compile(r"\b(?:in|for|at|over in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)")  # "the weather in New York"
 _HOME_RE = re.compile(r"\b(?i:lives in) ([A-Z][A-Za-z'. -]*?)(?:,|\.|$| and | with )")  # facts start "Lives in"
 
@@ -67,12 +82,12 @@ class ToolGate:
         once the prompt stopped insisting, and made the weather up in others ("it's a sunny
         Saturday morning" against drizzle and 81 % rain, 2026-09-26)."""
         calls: list[tuple[str, dict[str, Any]]] = []
-        if TRIGGERS["get_weather"].search(text or ""):
+        if ROUTES["get_weather"].search(text or ""):
             m = _CITY_RE.search(text or "")
             city = m.group(1).strip() if m else self.home_city
             if city:
                 calls.append(("get_weather", {"city": city}))
-        if TRIGGERS["get_current_time"].search(text or ""):
+        if ROUTES["get_current_time"].search(text or ""):
             calls.append(("get_current_time", {}))
         return calls
 

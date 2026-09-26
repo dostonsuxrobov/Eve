@@ -176,3 +176,23 @@ What it does not fix, from the same transcripts: coherence ("The tree is bigger 
 lines (6 -> 11 of 56, up with the new tool note), and flat replies ("I'm not sure.", "I don't know.").
 The cloud 27B on the same voice was coherent throughout the owner's session. Brain size decides the
 sense; scaffolding decides whether what she says is checked against what she knows.
+
+## "Slower and dumber" (2026-09-26, afternoon)
+
+The owner's next two sessions (1B and cloud 27B, both on Chatterbox) felt slower and dumber.
+From `voice/server.log`: Chatterbox ran at **0.70-0.73x real time** (1.39-1.41 s of work per second
+of speech) against 0.88-0.99x in the five earlier sessions; first audio median 3.2-3.4 s against
+2.1-2.7 s. Same code, same voice. The laptop was **on battery**: Windows capped the GPU at 50 W
+(101 W on AC). Two `tail -f | grep` pipelines left over from this session's monitoring had also
+been spinning since the day before (about 227 s of CPU each); stopped. `run.py` now warns at
+startup when on battery (`eva/gpu.py on_battery`).
+
+Mine: the router looked up the weather for mentions, not requests ("Raining outside. I love it.",
+"What do you know about the rain?", "the difference between the weather and the climate"), ~0.9 s
+each and a forecast in the reply. It now fires only on requests (`ROUTES` in `eva/toolgate.py`;
+the owner's lines are the test).
+
+"Too short" (owner): the persona asked for one to three sentences under forty words and called a
+two-word reply "often plenty"; the small one under thirty. Now two to four sentences, a real answer
+to a real question up to about sixty words (small persona: two or three, under fifty). Replay, 4
+sessions of the 1B: 0/28 flagged, weather looked up 4/4, words per reply median 25 (was 12).

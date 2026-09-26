@@ -196,7 +196,10 @@ async def run_real(args: argparse.Namespace) -> int:
     mic = ScenarioMic(paths, gap=args.gap, barge_in_at=args.barge_in_at)
     log.hooks.append(mic.on_event)
 
-    from eva.gpu import free_ollama, gpu_used_mib
+    from eva.gpu import free_ollama, gpu_used_mib, on_battery
+
+    if on_battery():
+        console.print("[yellow]on battery: the GPU is capped at 50 W; timings are not comparable with runs on AC[/]")
 
     freed = free_ollama(session.ollama_models)
     if freed:

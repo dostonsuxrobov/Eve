@@ -46,6 +46,30 @@ def free_ollama(keep: set[str]) -> list[str]:
     return gone
 
 
+def on_battery() -> bool | None:
+    """True when the laptop runs on battery. Windows then caps this GPU at 50 W instead of ~93 W:
+    Chatterbox went from 0.88-0.99x to 0.70-0.73x real time, first audio 2.3 -> 3.3 s, in the
+    owner's sessions of 2026-09-26 (read as "slower and dumber" until the power state was checked)."""
+    import sys
+
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        class _Status(ctypes.Structure):
+            _fields_ = [("ACLineStatus", ctypes.c_byte), ("BatteryFlag", ctypes.c_byte),
+                        ("BatteryLifePercent", ctypes.c_byte), ("SystemStatusFlag", ctypes.c_byte),
+                        ("BatteryLifeTime", ctypes.c_ulong), ("BatteryFullLifeTime", ctypes.c_ulong)]
+
+        st = _Status()
+        if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(st)):
+            return None
+        return {0: True, 1: False}.get(st.ACLineStatus)
+    except Exception:
+        return None
+
+
 def gpu_used_mib() -> int | None:
     """What ``nvidia-smi`` says is in use on the card (all processes)."""
     try:

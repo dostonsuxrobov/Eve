@@ -318,7 +318,11 @@ async def amain(args: argparse.Namespace) -> int:
         frames = mic.frames()
         segmenter = UtteranceSegmenter(settings)
 
-    from eva.gpu import GPU_TOTAL_MIB, GPU_WARN_MIB, free_ollama, gpu_used_mib
+    from eva.gpu import GPU_TOTAL_MIB, GPU_WARN_MIB, free_ollama, gpu_used_mib, on_battery
+
+    if on_battery():
+        console.print("[yellow]on battery: Windows caps the GPU at 50 W, and the voice runs about a third slower"
+                      " (measured). Plug in for full speed.[/]")
 
     freed = free_ollama(session.ollama_models)
     if freed:

@@ -105,6 +105,8 @@ why. That is how bugs get reported.
   paced stdin.
 * The phone client (`run.py --web --tls`): browsers allow the mic only on https (self-signed
   certificate via Git's openssl); its AudioWorklets are template strings, so no backticks inside.
+* On battery, Windows caps the GPU at 50 W (101 W on AC) and the voice runs about a third slower:
+  check the power state before calling anything a regression (`run.py` warns).
 * Ollama keeps every model loaded for its keep-alive (30 min here): models from an earlier session
   still hold VRAM. `eva/gpu.py` unloads them; measure VRAM with `nvidia-smi` (it counts what
   `ollama ps` leaves out, like the Qwen 3.5 vision encoder).
