@@ -76,6 +76,8 @@ async def amain(args: argparse.Namespace) -> int:
     from eva.s2s.driver import Call
 
     provider, _, model = args.backend.partition(":")
+    if args.web:
+        return await serve_phone(args, provider, model)
     if args.fresh:
         from eva.jobs.dispatch.world import build
 
@@ -174,6 +176,49 @@ async def amain(args: argparse.Namespace) -> int:
     return 0
 
 
+async def serve_phone(args: argparse.Namespace, provider: str, model: str) -> int:
+    """The phone page (https://<laptop-ip>:8443) talking to this model; tools run here."""
+    from eva.s2s import job_client
+    from eva.s2s.driver import Call
+    from eva.web.s2s_server import serve_s2s
+
+    kw: dict[str, Any] = {"voice": args.voice} if args.voice else {}
+    if provider == "openai":
+        kw.update({"turn_detection": "semantic_vad", "eagerness": args.eagerness} if args.eagerness else {"turn_detection": "server_vad"})
+    state: dict[str, Any] = {}
+    show = printer(state)
+
+    def on_console(name: str, data: dict[str, Any]) -> None:
+        if name == "web_ready":
+            console.print(f"\n[bold green]On your phone (same Wi-Fi), open:[/] [bold]{data['url']}[/]")
+            console.print("[dim]  the certificate is this laptop's own: tap 'Show details' / 'Advanced' and continue to the site; "
+                          "then Start and allow the microphone. Ctrl-C here ends it.[/]")
+        elif name == "web_hello":
+            console.print(f"\n[green]phone connected[/] [dim]{escape(data.get('ua', ''))}[/]")
+        elif name == "call_over":
+            console.print(f"\n[bold]call over: ${data['cost']:.3f}[/] [dim]({data['turns']} turns; every event: {data['log']})[/]")
+        else:
+            show(name, data)
+
+    def make_call(player: Any, on_event: Any, log: Any) -> tuple[Any, Any]:
+        if args.fresh:
+            from eva.jobs.dispatch.world import build
+
+            build()
+        client, tools = job_client(provider, model, args.job, args.user_name, **kw)
+        return Call(client, tools, player=player, on_event=on_event, log=log), client
+
+    log_dir = ROOT / "bench" / "out" / "sessions"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"[bold]{args.backend}[/] as the {args.job} desk, for the phone.")
+    try:
+        await serve_s2s(make_call, printer=on_console, name=args.backend.replace(":", "_").replace("+", "_"),
+                        log_dir=log_dir, port=args.port, tls=not args.no_tls)
+    except asyncio.CancelledError:
+        pass
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("backend", help="openai:gpt-realtime-2.1 | openai-live:gpt-live-1 | gemini:gemini-3.8-live | ... (dispatch.py --list)")
@@ -184,6 +229,9 @@ def main() -> int:
     ap.add_argument("--fresh", action="store_true", help="rebuild the dispatch world first")
     ap.add_argument("--user-name", default="Doston")
     ap.add_argument("--input-device", type=int, help="microphone index (python run.py --list-devices)")
+    ap.add_argument("--web", action="store_true", help="serve the phone page instead of this laptop's mic: https://<laptop-ip>:8443")
+    ap.add_argument("--port", type=int, default=8443)
+    ap.add_argument("--no-tls", action="store_true", help="plain http (browsers then allow the mic only on localhost)")
     args = ap.parse_args()
     try:
         return asyncio.run(amain(args))

@@ -123,6 +123,7 @@ class Call:
             self.on_event("text_in", {"text": ev["text"]})
         elif t == "text_in_part":
             self._heard_parts.append(ev["text"])
+            self.on_event("text_in_part", {"text": ev["text"]})
         elif t in ("speech_started", "interrupted"):
             self.on_event(t, {})
             # properties, not methods: calling them raised on OpenAI's first speech_started and killed

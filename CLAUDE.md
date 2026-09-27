@@ -70,6 +70,9 @@ negotiate rates, give updates.
 * **GPT-Live** (the owner's favourite for realism) gets two prompts in OpenAI's recommended structure:
   `dispatcher_live.md` (role, backchannel / interruption / delegation policies, the backend's tools)
   and `dispatcher_backend.md` (procedures, rules, how to return a result).
+* **On the phone:** `dispatch.py <speech-to-speech variant> --web` serves the same phone page as Eva's loop
+  (`eva/web/s2s_server.py`): the phone's mic goes to the model through this laptop, which runs the tools; the
+  link is printed (https, the laptop's self-signed certificate, same Wi-Fi). The owner picked GPT-Live for it.
 * **Voices by ear:** `bench/voices.py render|play gemini|openai|live` renders one dispatcher line in every
   voice to `samples/out/voices/`; pick one with `dispatch.py <variant> --voice <name>`.
 * **Keys** (gitignored, first key-looking line of the file): `cerebras_api_key.txt`, `google_api_key.txt`,

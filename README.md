@@ -32,6 +32,7 @@ GPS pings, lane rates) and the tools to book loads, negotiate and give updates. 
 .venv\Scripts\python.exe dispatch.py eva-v3                          # Eva's loop: Parakeet + Cerebras 27B + ElevenLabs v3
 .venv\Scripts\python.exe dispatch.py openai-realtime-2.1             # one model hears and speaks (headphones)
 .venv\Scripts\python.exe dispatch.py openai-live                     # GPT-Live: full duplex
+.venv\Scripts\python.exe dispatch.py openai-live --web               # the same on your phone: https://<laptop-ip>:8443
 .venv\Scripts\python.exe dispatch.py gemini-live-thinking
 .venv\Scripts\python.exe dispatch.py --eval gemini-live --audio      # six spoken calls, checked
 .venv\Scripts\python.exe bench\dispatch_table.py                     # every result in one table

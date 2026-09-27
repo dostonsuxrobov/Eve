@@ -182,6 +182,14 @@ class WebPlayer:
         return min(self._written, int(elapsed * self.sample_rate))
 
     @property
+    def buffered_samples(self) -> int:  # the local Player's name for it (eva.s2s.driver uses it on a barge-in)
+        return max(0, self._written - self.played_samples)
+
+    @property
+    def played_seconds(self) -> float:
+        return self.played_samples / self.sample_rate
+
+    @property
     def buffered_seconds(self) -> float:
         return max(0.0, (self._written - self.played_samples) / self.sample_rate)
 
