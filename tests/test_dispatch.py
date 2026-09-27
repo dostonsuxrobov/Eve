@@ -151,3 +151,76 @@ def test_a_job_never_touches_the_owners_memory(tmp_path: Path) -> None:
     assert s.job == "dispatch" and "Red Oak Transport" in s.system_prompt and s.memory.facts == []
     assert "data" in str(s.memory.path) and "dispatch" in str(s.memory.path)
     assert {t.name for t in s.tools} >= {"book_load", "load_status"} and s.greeting_event("Doston")["type"] == "job_start"
+
+
+def test_gpt_live_hands_backend_function_calls_to_the_driver() -> None:
+    """GPT-Live's backend calls arrive nested in response.event: collected from output_item.done,
+    handed over once the backend response completes, its tokens costed at the backend's price."""
+    from eva.s2s import make_client
+
+    live = make_client("openai-live", "gpt-live-1+gpt-5.6-sol", "prompt", dispatch_tools())
+    assert live.model == "gpt-live-1" and live.backend == "gpt-5.6-sol"
+    live._backend({"type": "response.created", "response": {"id": "r1"}})
+    live._backend({"type": "response.output_item.done", "response_id": "r1",
+                   "item": {"type": "function_call", "call_id": "c1", "name": "load_status", "arguments": '{"reference": "7781234"}'}})
+    assert live.events.empty() and live._busy == {"r1"}
+    live._backend({"type": "response.completed", "response": {"id": "r1", "usage": {"input_tokens": 1000, "output_tokens": 100}}})
+    ev = live.events.get_nowait()
+    assert ev == {"type": "tool_calls", "calls": [("c1", "load_status", {"reference": "7781234"})]}
+    assert not live._busy and live.backend_cost == pytest.approx((1000 * 4.0 + 100 * 20.0) / 1e6)
+
+
+def test_latency_counts_her_voice_not_her_silence() -> None:
+    """A full-duplex model streams audio all the time: only chunks above -45 dBFS count as her
+    speaking, so the time to her first word isn't the time to her first silent packet."""
+    from eva.s2s.driver import Call
+
+    class Quiet:
+        out_rate = 24000
+        cost = 0.0
+
+        def __init__(self) -> None:
+            self.events: asyncio.Queue = asyncio.Queue()
+
+        async def connect(self) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    async def go() -> None:
+        c = Quiet()
+        call = Call(c, [])
+        await call.start()
+        c.events.put_nowait({"type": "audio", "pcm": bytes(960)})  # 20 ms of digital silence
+        tone = (np.sin(np.arange(480) / 3) * 8000).astype(np.int16).tobytes()
+        c.events.put_nowait({"type": "audio", "pcm": tone})
+        await asyncio.sleep(0.1)
+        assert len(call.turn.voiced) == 1 and call.turn.first_audio_s is not None
+        await call.close()
+
+    import numpy as np
+
+    asyncio.run(go())
+
+
+def test_the_dispatcher_speaks_in_its_own_elevenlabs_voice(tmp_path: Path) -> None:
+    """ElevenLabs models in a dispatch session use the job's voice, warmed up at start (it took
+    3.95 s to its first audio cold on v3, 0.66 s warm); the companion keeps the owner's voice."""
+    from eva.config import ELEVENLABS_VOICE, make_preset
+    from eva.jobs import JOB_VOICES
+    from eva.session import build_session
+
+    job = build_session(make_preset("qwen4b", "v3"), user_name="Doston", job="dispatch")
+    assert job.stack.voice.voice_id == JOB_VOICES["dispatch"] and job.stack.voice.warm_voice
+    mine = build_session(make_preset("qwen4b", "v3"), user_name="Doston", memory_path=tmp_path / "m.json")
+    assert mine.stack.voice.voice_id == ELEVENLABS_VOICE and not mine.stack.voice.warm_voice
+
+
+def test_a_reference_is_found_however_it_was_heard(desk: Desk) -> None:
+    """Spoken calls: models asked for "PHX55120", "PHX 55120" and "PAX 55,120" for PHX-55120, and
+    the exact match said there was no such load; the lookup now ignores spacing, dashes and case
+    and falls back to the digits. A wrong number still finds nothing."""
+    for said in ("PHX-55120", "PHX55120", "phx 55120", "PAX 55,120", "55120"):
+        assert j(desk.load_status(said))["load"] == PLANTED["broken_load"], said
+    assert "error" in j(desk.load_status("PH-556120"))

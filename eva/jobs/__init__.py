@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 JOBS = ("dispatch",)
+# Each job's own ElevenLabs voice (owner's pick, 2026-09-27), used on every ElevenLabs model.
+JOB_VOICES = {"dispatch": "GZ4PpFJV8ikEGUtBrjK7"}
 
 
 def job_tools(job: str) -> list[Any]:

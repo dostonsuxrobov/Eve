@@ -28,12 +28,14 @@ Red Oak Transport's dispatcher: a fake carrier's database (trucks, drivers, brok
 GPS pings, lane rates) and the tools to book loads, negotiate and give updates. Play a broker.
 
 ```
-.venv\Scripts\python.exe run.py --job dispatch --brain qwen27b --voice v3conv   # Eva's loop: Parakeet + Cerebras 27B + ElevenLabs
-.venv\Scripts\python.exe run_s2s.py gemini:gemini-3.8-live                        # one model hears and speaks (headphones)
-.venv\Scripts\python.exe run_s2s.py openai:gpt-realtime-2.1                      # needs openai_key.txt
-.venv\Scripts\python.exe run_s2s.py openai:gpt-realtime-2.1-mini
-.venv\Scripts\python.exe bench\dispatch_eval.py gemini:gemini-3.8-live           # six scripted calls, checked
-.venv\Scripts\python.exe -m eva.jobs.dispatch.world                               # a fresh world (bookings reset)
+.venv\Scripts\python.exe dispatch.py --list                          # every variant
+.venv\Scripts\python.exe dispatch.py eva-v3                          # Eva's loop: Parakeet + Cerebras 27B + ElevenLabs v3
+.venv\Scripts\python.exe dispatch.py openai-realtime-2.1             # one model hears and speaks (headphones)
+.venv\Scripts\python.exe dispatch.py openai-live                     # GPT-Live: full duplex
+.venv\Scripts\python.exe dispatch.py gemini-live-thinking
+.venv\Scripts\python.exe dispatch.py --eval gemini-live --audio      # six spoken calls, checked
+.venv\Scripts\python.exe bench\dispatch_table.py                     # every result in one table
+.venv\Scripts\python.exe -m eva.jobs.dispatch.world                  # a fresh world (bookings reset)
 ```
 
 ## Measure

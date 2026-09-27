@@ -68,7 +68,7 @@ class OpenAIRealtime:
         if not key:
             raise RuntimeError("no OpenAI key: put it in openai_key.txt or OPENAI_API_KEY")
         self.ws = await connect(URL.format(model=self.model), additional_headers={"Authorization": f"Bearer {key}"},
-                                max_size=None, ping_interval=20)
+                                max_size=None, ping_interval=None)
         td: dict[str, Any] | None = None
         if self.turn_detection == "semantic_vad":
             td = {"type": "semantic_vad", "eagerness": self.eagerness, "create_response": True, "interrupt_response": True}

@@ -521,6 +521,15 @@ class Desk:
             row = self.q1("SELECT * FROM loads WHERE number = ?", (f"RO-{digits}",))
             if row is None:
                 row = self.q1("SELECT * FROM loads WHERE broker_ref = ? OR broker_ref = ? ORDER BY pickup_appt DESC LIMIT 1", (r, digits))
+            if row is None and len(digits) >= 4:
+                # a reference as a caller says it and a model writes it: "PHX 55120", "PHX55120", "pax 55,120"
+                # for PHX-55120 (spoken calls, 2026-09-27: 6 of 12 models missed the load on the exact match)
+                key = re.sub(r"[^a-z0-9]", "", r.lower())
+                for cand in self.q("SELECT * FROM loads WHERE broker_ref GLOB ? ORDER BY pickup_appt DESC", (f"*{digits[-4:]}*",)):
+                    ref_key = re.sub(r"[^a-z0-9]", "", (cand["broker_ref"] or "").lower())
+                    if ref_key == key or re.sub(r"\D", "", ref_key) == digits:
+                        row = cand
+                        break
             if row is None and len(digits) <= 3:  # a truck unit
                 row = self.q1("SELECT * FROM loads WHERE truck = ? ORDER BY pickup_appt DESC LIMIT 1", (digits,))
             if row is not None:

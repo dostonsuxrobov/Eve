@@ -81,8 +81,10 @@ async def amain(args: argparse.Namespace) -> int:
     kw: dict[str, Any] = {}
     if args.voice:
         kw["voice"] = args.voice
-    if provider == "openai" and args.eagerness:
-        kw["eagerness"] = args.eagerness
+    if provider == "openai":
+        # a 500 ms silence endpoint like Eva's loop; OpenAI's semantic VAD (--eagerness) waited up to 4 s
+        # to be sure the caller was done: 5.0-5.3 s answers on the spoken dispatch calls (2026-09-27)
+        kw.update({"turn_detection": "semantic_vad", "eagerness": args.eagerness} if args.eagerness else {"turn_detection": "server_vad"})
     client = make_client(provider, model, prompt, tools, **kw)
     player = Player(client.out_rate)
     player.start()
@@ -141,10 +143,10 @@ async def amain(args: argparse.Namespace) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("backend", help="openai:gpt-realtime-2.1 | openai:gpt-realtime-2.1-mini | gemini:gemini-3.8-live | ...")
+    ap.add_argument("backend", help="openai:gpt-realtime-2.1 | openai-live:gpt-live-1 | gemini:gemini-3.8-live | ... (dispatch.py --list)")
     ap.add_argument("--job", default="dispatch")
     ap.add_argument("--voice", help="OpenAI: marin, cedar, ...; Gemini: Aoede, Kore, Puck, ...")
-    ap.add_argument("--eagerness", choices=["low", "medium", "high", "auto"], help="OpenAI semantic VAD: how soon she answers")
+    ap.add_argument("--eagerness", choices=["low", "medium", "high", "auto"], help="OpenAI: use semantic VAD with this eagerness instead of a 500 ms silence endpoint")
     ap.add_argument("--text", action="store_true", help="type your lines instead of talking")
     ap.add_argument("--fresh", action="store_true", help="rebuild the dispatch world first")
     ap.add_argument("--user-name", default="Doston")

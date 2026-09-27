@@ -29,11 +29,15 @@ PRICES: dict[str, dict[str, float]] = {
     "gemini-3.8-live": {"audio_in": 3.0, "audio_out": 12.0, "text_in": 0.75, "text_out": 4.50},
     "gemini-3.8-live-extended-thinking": {"audio_in": 3.0, "audio_out": 12.0, "text_in": 0.75, "text_out": 4.50},
     "gemini-3.1-flash-live-preview": {"audio_in": 3.0, "audio_out": 12.0, "text_in": 0.75, "text_out": 4.50},
+    "gemini-2.5-flash-native-audio-latest": {"audio_in": 3.0, "audio_out": 12.0, "text_in": 0.50, "text_out": 2.0},
+    "gpt-realtime-1.5": {"audio_in": 32, "audio_in_cached": 0.40, "audio_out": 64, "text_in": 4, "text_in_cached": 0.40, "text_out": 16},
 }
 
 MODELS = {
-    "openai": ["gpt-realtime-2.1", "gpt-realtime-2.1-mini"],
-    "gemini": ["gemini-3.8-live", "gemini-3.8-live-extended-thinking", "gemini-3.1-flash-live-preview"],
+    "openai": ["gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime-2", "gpt-realtime-1.5", "gpt-realtime", "gpt-realtime-mini"],
+    "openai-live": ["gpt-live-1", "gpt-live-1+gpt-5.6-sol"],  # full duplex; "+backend" picks the Responses model
+    "gemini": ["gemini-3.8-live", "gemini-3.8-live-extended-thinking", "gemini-3.1-flash-live-preview",
+               "gemini-2.5-flash-native-audio-latest"],
 }
 
 
@@ -42,6 +46,11 @@ def make_client(provider: str, model: str, instructions: str, tools: list[Any], 
         from .openai_rt import OpenAIRealtime
 
         return OpenAIRealtime(model, instructions, tools, **kw)
+    if provider == "openai-live":
+        from .openai_live import OpenAILive
+
+        live, _, backend = model.partition("+")
+        return OpenAILive(live, instructions, tools, **({"backend": backend} if backend else {}), **kw)
     if provider == "gemini":
         from .gemini_live import GeminiLive
 

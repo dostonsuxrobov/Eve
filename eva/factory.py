@@ -63,7 +63,8 @@ def build_llm(cfg: dict[str, Any]) -> LLM:
             model=model,
             extra_body=cfg.get("extra_body"),
             max_tokens=cfg.get("max_tokens", 400),
-            temperature=cfg.get("temperature", 0.8),
+            temperature=cfg.get("temperature", 0.8),  # None: left out (OpenAI's reasoning models reject it)
+            token_param=cfg.get("token_param", "max_tokens"),
         )
     raise ValueError(f"unknown llm kind {kind!r}")
 

@@ -93,7 +93,7 @@ class GeminiLive:
         key = key_file("google_api_key.txt", "GEMINI_API_KEY")
         if not key:
             raise RuntimeError("no Google key: put it in google_api_key.txt or GEMINI_API_KEY")
-        self.ws = await connect(URL.format(key=key), max_size=None, ping_interval=20)
+        self.ws = await connect(URL.format(key=key), max_size=None, ping_interval=None)
         gen: dict[str, Any] = {"responseModalities": ["AUDIO"],
                                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.voice}}}}
         if self.thinking:

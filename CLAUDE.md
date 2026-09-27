@@ -50,13 +50,19 @@ negotiate rates, give updates.
   enforce the rules whatever the model says (cost floor, do-not-use brokers, hazmat endorsement,
   trailer type, pickup window). Persona `eva/assets/personas/en/dispatcher.md`. A job session never
   reads or writes the owner's personal memory.
-* **Backends, same persona and tools:** Eva's loop (`run.py --job dispatch --brain qwen27b --voice v3conv`:
-  Parakeet + Cerebras Qwen3.8-27B + ElevenLabs) and speech-to-speech (`run_s2s.py openai:gpt-realtime-2.1`,
-  `openai:gpt-realtime-2.1-mini`, `gemini:gemini-3.8-live`; `eva/s2s/`, raw WebSockets, prices in `eva/s2s/__init__.py`).
-  The owner allows closed models for these tests; the open-brain rule stands for Eva's own loop.
-* **Measure:** `bench/dispatch_eval.py <backend>` (six scripted calls, fresh world each, fact checks;
-  Cerebras ~50 completions a run, Gemini ~$0.25) and `bench/s2s_audio_check.py <backend>` (a spoken
-  caller). Results in docs/MEASUREMENTS.md.
+* **Backends, same persona and tools, one launcher:** `dispatch.py --list` / `dispatch.py <variant>`.
+  Eva's loop (`eva-v3`: Parakeet + Cerebras Qwen3.8-27B + ElevenLabs v3 in the dispatcher's own voice
+  `GZ4PpFJV8ikEGUtBrjK7`, `eva/jobs.JOB_VOICES`) and each company's speech-to-speech tiers: OpenAI
+  gpt-realtime 2.1 / 2.1-mini / 2 / 1.5 / original / mini, GPT-Live 1 (full duplex; tools through a
+  Responses backend, gpt-5.6-luna or -sol), Gemini 3.8 Live / 3.8 extended thinking / 3.1 Flash Live /
+  2.5 native audio (`eva/s2s/`, raw WebSockets, prices in `eva/s2s/__init__.py`). The owner meant their
+  speech-to-speech tiers, not text models behind Eva's loop. Closed models are fine for these tests;
+  the open-brain rule stands for Eva's own loop.
+* **Measure:** `dispatch.py --eval <variant> --audio` (six calls, the caller spoken by Kokoro in real
+  time, fresh world each, 28 checks; `EVA_DISPATCH_DB` gives parallel runs their own database) and
+  `bench/dispatch_table.py` (one table). A full round of all tiers cost ~$6 OpenAI + ~$1.5 Google.
+  Results in docs/MEASUREMENTS.md. OpenAI realtime runs with a 500 ms silence endpoint: the default
+  semantic VAD waited up to 4 s.
 * **Keys** (gitignored, first key-looking line of the file): `cerebras_api_key.txt`, `google_api_key.txt`,
   `openai_key.txt`, `elevenlabs_key.txt`.
 * **RunPod pilot scaffolding** (`deploy/runpod/`, `voice/server.py`, `qwen27b-pod`): written and tested
@@ -129,9 +135,9 @@ a voice failover, the credits a turn cost) prints a dim line saying why.
 
 ## Next (the owner orders it)
 
-0. **Dispatch MVP:** the owner talks to each backend and judges by ear; OpenAI runs once
-   `openai_key.txt` exists; Eva's 27B talks too long (median 63-74 words a reply against Gemini's 25);
-   then cost per call, a phone line, and a real design partner.
+0. **Dispatch MVP:** the owner talks to the variants and judges by ear (28/28 so far: gpt-realtime
+   2.1 / 2 / 1.5, Gemini 3.8 Live extended thinking, Eva's loop); Eva's 27B talks too long (68 words a
+   reply against Gemini's 22); then cost per call, a phone line, and a real design partner.
 1. **The voice by ear:** v3 vs v3 Conversational vs Flash on the new voice, in real sessions.
 2. **Latency:** end-of-turn prediction (SmartTurn) instead of the fixed 0.5 s wait; a streaming or
    faster STT for long utterances (Parakeet took 1.1 s on an 8 s one).

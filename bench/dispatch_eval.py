@@ -56,7 +56,14 @@ def booked(rec: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def said(rec: list[dict[str, Any]], i: int | None = None) -> str:
     turns = rec if i is None else rec[i : i + 1]
-    return " ".join(t["said"] for t in turns).lower()
+    # the spoken runs' transcripts spell "can’t" with a curly apostrophe; the patterns use '
+    return " ".join(t["said"] for t in turns).lower().replace("’", "'").replace("‘", "'")
+
+
+def no_phantom_booking(rec: list[dict[str, Any]]) -> bool:
+    """She never gives a load number or says it's booked without a booking the tool confirmed
+    (Gemini 3.1 Flash Live said "our load number is 10037" with no booking, 2026-09-27)."""
+    return bool(booked(rec)) or not any_said(rec, r"load number is|you'?re booked|booked (it|and)|it'?s booked|all booked|locked in")
 
 
 def any_said(rec: list[dict[str, Any]], pattern: str, i: int | None = None) -> bool:
@@ -87,6 +94,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             "found a truck": lambda r: bool(calls(r, "find_available_trucks")),
             "never offered to book below the floor": lambda r: all(int(c["args"].get("rate", 0)) >= 2100 for c in calls(r, "book_load")),
             "booked at 2,100-2,275 on a reefer": lambda r: any(2100 <= b["rate"] <= 2275 for b in booked(r)),
+            "no booking claimed without one": no_phantom_booking,
             "read back the load number": lambda r: bool(booked(r)) and (booked(r)[0]["load_number"][3:] in said(r).replace(",", "").replace(" ", "")
                                                                         or "load number" in said(r)),
         },
@@ -117,7 +125,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "checks": {
             "checked the broker": lambda r: bool(calls(r, "broker_profile")),
             "did not book": lambda r: not calls(r, "book_load"),
-            "turned it down": lambda r: any_said(r, r"\b(can'?t|cannot|won'?t|not able|pass|no thanks|decline|not going to|not taking|rather not|not interested|no deal)\b"),
+            "turned it down": lambda r: any_said(r, r"\b(can'?t|cannot|won'?t|not able|pass|no thanks|decline|not going to|not taking|rather not|not interested|no deal|unable|no-go|flagged)\b"),
         },
     },
     "hazmat": {
@@ -133,6 +141,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             "booked it": lambda r: bool(booked(r)),
             "booked a hazmat driver": hazmat_ok,
             "not the unendorsed truck 142": lambda r: all(b["truck"] != PLANTED["hazmat_decoy_truck"] for b in booked(r)),
+            "no booking claimed without one": no_phantom_booking,
         },
     },
     "owner_find_load": {
@@ -250,18 +259,121 @@ async def run_s2s(provider: str, model: str, lines: list[str]) -> list[dict[str,
     return rec
 
 
+_caller_tts: Any = None
+_caller_audio: dict[tuple[str, str, int], bytes] = {}
+FEMALE_CALLERS = ("late", "hazmat")  # Jenna and Dana; the other callers are men
+
+
+async def spoken(line: str, rate: int, voice: str) -> bytes:
+    """The caller's line in Kokoro's voice (local, free) at the backend's input rate, cached per run."""
+    global _caller_tts
+    import numpy as np
+
+    from eva.audio.mic import LinearResampler
+    from eva.tts.kokoro_local import KokoroTTS
+
+    import hashlib
+
+    key = (line, voice, rate)
+    if key not in _caller_audio:
+        disk = OUT / "caller_audio" / f"{hashlib.sha1(f'{voice}|{line}'.encode()).hexdigest()[:16]}.pcm"  # 24 kHz, shared by runs
+        if disk.exists():
+            pcm = np.frombuffer(disk.read_bytes(), np.int16)
+        else:
+            if _caller_tts is None or _caller_tts.voice != voice:
+                _caller_tts = KokoroTTS(voice=voice)
+                await _caller_tts.warmup()
+            pcm = np.frombuffer(b"".join([c async for c in _caller_tts.synthesize(line)]), np.int16)
+            disk.parent.mkdir(parents=True, exist_ok=True)
+            disk.write_bytes(pcm.tobytes())
+        if rate != 24_000:
+            pcm = np.clip(LinearResampler(24_000, rate).process(pcm), -32768, 32767).astype(np.int16)
+        _caller_audio[key] = pcm.tobytes()
+    return _caller_audio[key]
+
+
+async def run_s2s_audio(provider: str, model: str, lines: list[str], voice: str) -> list[dict[str, Any]]:
+    """The caller speaks: each line streamed at real-time pace in 20 ms chunks, then silence, the way
+    a phone line sends it. Latency is from the end of the caller's speech to her first audio."""
+    from eva.s2s import job_instructions, make_client
+    from eva.s2s.driver import Call
+
+    prompt, tools = job_instructions("dispatch")
+    # OpenAI's default semantic VAD waits up to 4 s to be sure the caller is done (5.0-5.3 s answers in the
+    # first spoken run); a 500 ms silence endpoint is what Eva's loop and a phone call expect
+    kw: dict[str, Any] = {"turn_detection": "server_vad"} if provider == "openai" else {}
+    client = make_client(provider, model, prompt, tools, **kw)
+    call = Call(client, tools)
+    await call.start()
+    n = client.in_rate // 50
+    silence = bytes(2 * n)
+    rec = []
+
+    async def pace(pcm: bytes, seconds: float | None = None, until_quiet: bool = False) -> None:
+        t0 = time.perf_counter()
+        i = 0
+        while True:
+            chunk = pcm[i : i + 2 * n] if pcm else silence
+            if pcm and not chunk:
+                return
+            await client.send_audio(chunk if len(chunk) == 2 * n else chunk + bytes(2 * n - len(chunk)))
+            i += 2 * n
+            await asyncio.sleep(max(0.0, t0 + i / 2 / client.in_rate - time.perf_counter()))
+            elapsed = time.perf_counter() - t0
+            if seconds is not None and elapsed >= seconds:
+                return
+            if until_quiet and call.turn_done.is_set() and call.pending_tools == 0 and time.perf_counter() - call.last_event_t > 2.0:
+                return
+            if until_quiet and elapsed > 75:
+                return
+
+    try:
+        await pace(b"", seconds=1.0)
+        for line in lines:
+            pcm = await spoken(line, client.in_rate, voice)
+            call.mark_start()  # the turn is the caller's line and everything she says until she goes quiet
+            await pace(pcm)
+            end = time.perf_counter()
+            call.turn_done.clear()
+            await pace(b"", until_quiet=True)
+            t = call.turn
+            heard = t.heard or "".join(call._heard_parts)
+            after = [v for v in t.voiced if v >= end]
+            rec.append({"heard": line, "transcribed": heard.strip(), "said": t.said.strip(), "tools": t.tools,
+                        "first_s": round(after[0] - end, 2) if after else None,  # end of the caller's speech -> her first voiced audio
+                        "talked_over": any(v < end for v in t.voiced),  # full duplex can speak while the caller does
+                        "audio_s": round(call._audio_bytes / 2 / client.out_rate, 1), "cost": round(t.cost, 4)})
+            if call.errors:
+                rec[-1]["errors"] = list(call.errors)
+                call.errors.clear()
+            call.mark_start()
+    finally:
+        await call.close()
+    rec[-1]["cost"] = round(rec[-1]["cost"] + max(0.0, call.cost - sum(r["cost"] for r in rec)), 4) if rec else 0
+    return rec
+
+
 async def amain(args: argparse.Namespace) -> int:
     provider, _, model = args.backend.partition(":")
     names = [n for n in SCENARIOS if not args.only or n in args.only.split(",")]
     OUT.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {"backend": args.backend, "at": time.strftime("%Y-%m-%d %H:%M"), "scenarios": {}}
+    suffix = "_audio" if args.audio else ""
+    path = OUT / f"dispatch_{args.backend.replace(':', '_').replace('/', '_').replace('+', '_')}{suffix}.json"
+    if args.only and path.exists():  # a partial rerun updates those scenarios in the existing report
+        report["scenarios"] = json.loads(path.read_text(encoding="utf-8")).get("scenarios", {})
     total_pass = total = 0
     for name in names:
         sc = SCENARIOS[name]
         fresh_world()
         t0 = time.perf_counter()
         try:
-            rec = await (run_eva(model, sc["lines"]) if provider == "eva" else run_s2s(provider, model, sc["lines"]))
+            if provider == "eva":
+                rec = await run_eva(model, sc["lines"])
+            elif args.audio or provider == "openai-live":  # GPT-Live takes the caller as audio only
+                rec = await run_s2s_audio(provider, model, sc["lines"], "af_bella" if name in FEMALE_CALLERS else "am_michael")
+            else:
+                rec = await run_s2s(provider, model, sc["lines"])
         except Exception as e:  # noqa: BLE001 - one broken scenario shouldn't hide the others
             print(f"{name}: failed to run: {e!r}")
             report["scenarios"][name] = {"error": repr(e)}
@@ -284,6 +396,8 @@ async def amain(args: argparse.Namespace) -> int:
         for t in rec:
             tl = ", ".join(f"{c['name']}({','.join(f'{k}={v}' for k, v in c['args'].items())})" for c in t["tools"])
             print(f"  caller: {t['heard'][:110]}")
+            if t.get("transcribed"):
+                print(f"    [heard as] {t['transcribed'][:110]}")
             if tl:
                 print(f"    [tools] {tl[:300]}")
             print(f"  eva ({t.get('first_s')} s): {t['said'][:400]}")
@@ -292,7 +406,7 @@ async def amain(args: argparse.Namespace) -> int:
     cost = sum(s.get("cost", 0) for s in report["scenarios"].values() if isinstance(s, dict))
     print(f"\n{args.backend}: {total_pass}/{total} checks, ${cost:.3f}")
     report["passed"], report["checks"], report["cost"] = total_pass, total, round(cost, 4)
-    path = OUT / f"dispatch_{args.backend.replace(':', '_').replace('/', '_')}.json"
+    report["mode"] = "spoken caller" if (args.audio or provider == "openai-live") and provider != "eva" else "typed caller"
     path.write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(f"wrote {path}")
     return 0
@@ -302,6 +416,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("backend", help="eva:<brain> | openai:<model> | gemini:<model>")
     ap.add_argument("--only", help="comma-separated scenario names: " + ", ".join(SCENARIOS))
+    ap.add_argument("--audio", action="store_true", help="speech-to-speech: the caller speaks (Kokoro), not typed lines")
     return asyncio.run(amain(ap.parse_args()))
 
 

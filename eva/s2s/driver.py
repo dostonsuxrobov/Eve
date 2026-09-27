@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -30,6 +32,7 @@ class Turn:
     cost: float = 0.0
     interrupted: bool = False
     status: str = ""
+    voiced: list[float] = field(default_factory=list)  # perf_counter of every chunk of her audio above -45 dBFS
 
 
 class Call:
@@ -82,6 +85,9 @@ class Call:
             t = ev["type"]
             now = time.perf_counter() - self.turn.t_start
             if t == "audio":
+                pcm = np.frombuffer(ev["pcm"], np.int16)
+                if pcm.size and float(np.sqrt(np.mean(pcm.astype(np.float32) ** 2))) > 184:  # -45 dBFS: speech, not silence
+                    self.turn.voiced.append(self.last_event_t)
                 if self.turn.first_audio_s is None:
                     self.turn.first_audio_s = now
                     self.on_event("first_audio", {"s": now})

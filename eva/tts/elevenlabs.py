@@ -150,6 +150,7 @@ class ElevenLabsTTS:
         self._prev_ids: list[tuple[str, str]] = []  # (model_id, request_id) of recent chunks
         self.supports_audio_tags: bool = model_id.startswith("eleven_v3")
         self.name = f"elevenlabs/{model_id}/{voice_id}"
+        self.warm_voice = False  # render one word at warmup: for voices that load on first use
         self.last = SynthStats()
         self.calls = 0
         self.meter: Any = None  # eva.credits.CreditMeter: every response's credits go to it
@@ -220,6 +221,12 @@ class ElevenLabsTTS:
         client = self._http_client()
         with contextlib.suppress(httpx.HTTPError):
             await client.options(self._http_path())
+        if self.warm_voice:
+            # Some voices load on first use: the dispatcher's voice took 3.95 s to its first audio on v3
+            # cold and 0.66 s warm (2026-09-27). One short word here, during start-up, costs ~2 credits.
+            with contextlib.suppress(Exception):
+                async for _ in self._synthesize("Okay."):
+                    pass
 
     def synthesize(self, text: str, *, cue: str | None = None) -> AsyncIterator[bytes]:
         """Stream int16 PCM chunks for ``text``.

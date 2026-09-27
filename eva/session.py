@@ -106,8 +106,14 @@ def build_session(
     ``Memory.drop_name_facts``).
     """
     plan = lang_plan(lang)
+    if job and not voice and preset.tts.get("kind") == "elevenlabs":
+        from .jobs import JOB_VOICES
+
+        voice = JOB_VOICES.get(job)
     tts_overrides: dict[str, Any] = {"voice": voice} if voice else {}
     stack = build_stack(preset, brain=brain, tts_overrides=tts_overrides, on_event=on_event)
+    if job and hasattr(stack.voice, "warm_voice"):
+        stack.voice.warm_voice = True  # the job's voice loads on first use (eva/tts/elevenlabs.py)
     meter = None
     if hasattr(stack.voice, "meter"):  # a cloud voice: count its credits (eva.credits)
         from .credits import CreditMeter

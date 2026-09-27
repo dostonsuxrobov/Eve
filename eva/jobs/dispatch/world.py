@@ -14,6 +14,7 @@ number and company is invented.
 from __future__ import annotations
 
 import math
+import os
 import random
 import sqlite3
 import sys
@@ -23,7 +24,8 @@ from pathlib import Path
 
 from ...config import ROOT
 
-DB_PATH = ROOT / "data" / "dispatch.db"
+# EVA_DISPATCH_DB: another file, so two evals can run side by side without rebuilding each other's world
+DB_PATH = Path(os.environ.get("EVA_DISPATCH_DB") or ROOT / "data" / "dispatch.db")
 COMPANY = "Red Oak Transport"
 SEED = 7
 ROAD_FACTOR = 1.18  # straight-line miles to road miles
@@ -638,7 +640,14 @@ def build(path: Path = DB_PATH, *, seed: int = SEED, now: datetime | None = None
               ("cities", "facilities", "brokers", "broker_contacts", "drivers", "trucks", "trailers", "postings",
                "loads", "pings", "lane_rates", "fuel", "incidents", "messages")}
     db.close()
-    tmp.replace(path)
+    for attempt in range(20):  # Windows: a scanner can hold a fresh file for a moment
+        try:
+            tmp.replace(path)
+            break
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.25)
     return counts
 
 

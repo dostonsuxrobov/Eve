@@ -91,3 +91,43 @@ calls, the database and her words. Typed caller lines; a fresh world per call.
 * Open: the 27B talks too long for a phone (still a median of 63 words after "under about forty
   words" in the persona: it narrates between lookup rounds); Gemini booked the owner's load
   without asking him. OpenAI not run yet (no key on this machine).
+
+## The dispatcher on every speech-to-speech tier, with a spoken caller (2026-09-27)
+
+`bench/dispatch_eval.py <backend> --audio` (`dispatch.py --eval <variant> --audio`): the same six calls,
+the caller's 17 lines spoken by Kokoro and streamed at real-time pace in 20 ms chunks, the way a
+phone line sends them; 28 checks. "First word" is from the end of the caller's speech to her first
+audio above -45 dBFS (full-duplex GPT-Live streams while the caller talks, so the first packet is
+not her answer). OpenAI's realtime tiers run with a 500 ms silence endpoint: their default semantic
+VAD answered in 5.0-5.3 s on the first spoken run. A call here is 2-4 turns and 1-3 minutes.
+
+| backend | checks | first word, median / p90 | words per reply | $ per call |
+|---|---|---|---|---|
+| OpenAI gpt-realtime-2.1 | 28/28 | 1.20 / 2.04 s | 56 | 0.125 |
+| OpenAI gpt-realtime-2 | 28/28 | 1.81 / 3.36 s | 50 | 0.127 |
+| OpenAI gpt-realtime-1.5 | 28/28 | 1.16 / 3.61 s | 40 | 0.092 |
+| OpenAI gpt-realtime (Aug 2025) | 27/28 | 1.81 / 6.78 s | 26 | 0.089 |
+| OpenAI gpt-realtime-2.1-mini | 26/28 | 1.34 / 3.67 s | 59 | 0.033 |
+| OpenAI gpt-realtime-mini | 24/28 | 1.07 / 1.92 s | 41 | 0.025 |
+| OpenAI GPT-Live 1 + gpt-5.6-luna backend | 27/28 | 1.36 / 2.26 s | 34 | 0.179 |
+| OpenAI GPT-Live 1 + gpt-5.6-sol backend | 27/28 | 1.87 / 6.06 s | 40 | 0.276 |
+| Gemini 3.8 Live, extended thinking | 28/28 | 1.72 / 2.42 s | 22 | 0.098 |
+| Gemini 3.8 Live | 26/28 | 2.57 / 6.40 s | 22 | 0.052 |
+| Gemini 3.1 Flash Live (preview) | 25/28 | 1.92 / 2.15 s | 36 | 0.045 |
+| Gemini 2.5 Flash native audio | 23/28 | 3.31 / 4.51 s | 23 | 0.022 |
+| *Eva's loop, Cerebras 27B, typed caller, silent voice* | 28/28 | 0.59 / 1.08 s to her first sentence | 68 | tokens only |
+
+* Eva's number is not comparable: it starts after the caller's text and stops before the voice.
+  Add the 0.5 s endpoint, Parakeet (0.2-1.1 s) and ElevenLabs v3 in the dispatcher's voice
+  (`GZ4PpFJV8ikEGUtBrjK7`: 0.66 s warm, 3.95 s cold; warmed at session start now): ~1.9-2.8 s.
+* What failed, word for word: gpt-realtime-mini didn't check the do-not-use broker and started
+  negotiating with him; gpt-realtime-2.1-mini looked up "PO-771234" for 7781234 (a digit dropped)
+  and so never said the load was late; Gemini 3.1 Flash Live said "our load number is 10037" with no
+  booking (a new check catches a claimed booking without one); Gemini 2.5 booked with a made-up
+  posting id, then didn't; Gemini 3.8 Live didn't tell the broker about the breakdown in its first
+  answer; GPT-Live once gave no new delivery time.
+* A tool bug found by the spoken runs: models asked for "PHX55120", "PHX 55120", "PAX 55,120" for
+  PHX-55120 and the exact match found nothing (6 of 12 missed the breakdown load); the lookup now
+  ignores spacing, dashes and case and falls back to the digits (`test_a_reference_is_found_however_it_was_heard`).
+* Cost of this round, from the saved reports: about $5.90 OpenAI and $1.50 Google (a little more
+  with the replaced reruns). GPT-Live bills $0.05 a minute of session plus the backend's tokens.
