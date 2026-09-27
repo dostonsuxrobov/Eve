@@ -45,6 +45,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--voice", choices=list(VOICES), help="which voice")
     ap.add_argument("--list", action="store_true", help="print every brain and voice and exit")
     ap.add_argument("--persona", help="persona name (default: the brain's, eva or eva_small)")
+    ap.add_argument("--job", choices=["dispatch"], help="a work persona + tools on the same loop: dispatch = Red Oak Transport's dispatcher (eva/jobs/)")
     ap.add_argument("--list-devices", action="store_true", help="print audio devices and exit")
     ap.add_argument("--input-device", type=int)
     ap.add_argument("--output-device", type=int)
@@ -262,7 +263,7 @@ async def amain(args: argparse.Namespace) -> int:
     printer = StatusPrinter(debug=args.debug)
     session = build_session(
         preset, lang=args.lang, persona=args.persona, user_name=args.user_name or "",
-        mute_fillers=args.mute_fillers, on_event=printer,
+        mute_fillers=args.mute_fillers, on_event=printer, job=args.job,
     )
     printer.meter = session.credit_meter
     if session.credit_meter is not None:
@@ -326,7 +327,7 @@ async def amain(args: argparse.Namespace) -> int:
         frames = mic.frames()
         segmenter = UtteranceSegmenter(settings)
 
-    from eva.gpu import GPU_TOTAL_MIB, GPU_WARN_MIB, free_ollama, gpu_used_mib, on_battery
+    from eva.gpu import GPU_TOTAL_MIB, GPU_WARN_MIB, free_ollama, gpu_total_mib, gpu_used_mib, on_battery
 
     if on_battery():
         console.print("[yellow]on battery: Windows caps the GPU at 50 W (101 W plugged in); the local brain runs"
@@ -346,10 +347,10 @@ async def amain(args: argparse.Namespace) -> int:
         await asyncio.gather(stt.close(), llm.close(), tts.close(), return_exceptions=True)
         raise
     console.print(f"[dim]warm in {time.perf_counter() - t0:.2f}s: {stt.name} + {llm.name} + {tts.name}[/]")
-    used = gpu_used_mib()
+    used, total = gpu_used_mib(), gpu_total_mib() or GPU_TOTAL_MIB
     if used is not None:
-        console.print(f"[dim]GPU: {used} of {GPU_TOTAL_MIB} MiB in use[/]")
-        if used > GPU_WARN_MIB:
+        console.print(f"[dim]GPU: {used} of {total} MiB in use[/]")
+        if used > (GPU_WARN_MIB if total <= GPU_TOTAL_MIB else 0.97 * total):
             console.print("[yellow]the GPU is nearly full: past it Windows spills into system RAM and everything slows"
                           " down about 20x. A smaller brain or voice (run.py --list) keeps it fast.[/]")
 
@@ -409,7 +410,7 @@ async def amain(args: argparse.Namespace) -> int:
             player.stop()
         except Exception:
             pass
-        if agent.messages:
+        if agent.messages and not session.job:
             try:
                 with console.status("updating memory..."):
                     await asyncio.wait_for(

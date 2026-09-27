@@ -52,8 +52,9 @@ def test_default_session_is_english_only() -> None:
 # ------------------------------------------------------------------ variants
 def test_every_voice_builds_with_the_right_prompt(tmp_path: Path) -> None:
     """v3 / v3 Conversational get cues and sounds, Flash cues only (as voice settings), Kokoro
-    nothing; the cloud voices have Kokoro behind them and a credit meter; the 4B gets the
-    small-brain scaffolding."""
+    nothing; Chatterbox (the pod) cues only, Orpheus its own four sounds; the cloud and pod voices
+    have Kokoro behind them, only the cloud ones a credit meter; the 4B gets the small-brain
+    scaffolding."""
     from eva.config import VOICES, make_preset
     from eva.session import build_session
 
@@ -63,13 +64,17 @@ def test_every_voice_builds_with_the_right_prompt(tmp_path: Path) -> None:
         assert s.speech_guard is not None and s.tool_router is not None
         if voice in ("v3", "v3conv"):
             assert "Sounds are allowed" in prompt and s.tts.supports_audio_tags
-        elif voice == "flash":
+        elif voice in ("flash", "chatterbox"):
             assert "Never write sound tags" in prompt and not s.tts.supports_audio_tags
+            assert voice != "chatterbox" or ("[excited]" in prompt and s.tts.supports_cues)
+        elif voice == "orpheus":
+            assert all(t in prompt for t in ("[laughs]", "[chuckles]", "[sighs]", "[gasps]")) and s.tts.supports_audio_tags
         else:
             assert "Never write bracketed stage directions" in prompt
         cloud = VOICES[voice]["kind"] == "elevenlabs"
+        served = VOICES[voice]["kind"] == "voice-server"
         assert (s.credit_meter is not None) == cloud
-        assert (type(s.tts).__name__ == "FailoverTTS") == cloud, type(s.tts).__name__
+        assert (type(s.tts).__name__ == "FailoverTTS") == (cloud or served), type(s.tts).__name__
 
 
 def test_credit_meter_months_and_totals(tmp_path: Path) -> None:
@@ -385,3 +390,47 @@ def test_guard_drops_thinking_out_loud() -> None:
                  "I'm going to check the weather since the user asked.", "I'll ask the user."):
         kept, dropped = g.filter(line, tools_offered=True)
         assert kept == "" and dropped[0][1] == "thinking out loud", line
+
+
+# ------------------------------------------------------------------- the pod (deploy/runpod)
+def test_voice_server_text_and_cues() -> None:
+    """Eva's generic sounds become each engine's spelling; anything else in brackets goes;
+    her cue becomes Chatterbox's emotion strength."""
+    from eva.tts.voice_server import ENGINES, VoiceServerTTS, engine_text
+
+    assert engine_text("Ha. [laughs] Okay [whispers] fine [sighs].", ENGINES["orpheus"]["sounds"]) == "Ha. <laugh> Okay fine <sigh>."
+    assert engine_text("Ha [Laughs] and [sighs] ok", ENGINES["chatterbox-turbo"]["sounds"]) == "Ha [laugh] and ok"
+    assert engine_text("[warm] Hey there.", {}) == "Hey there."
+    cb = VoiceServerTTS("chatterbox", "eva")
+    assert cb.supports_cues and not cb.supports_audio_tags
+    assert cb.params_for("excited")["exaggeration"] > cb.params_for("soft")["exaggeration"]
+    assert cb.params_for("nonsense") == {} and cb.params_for(None) == {}
+    orpheus = VoiceServerTTS("orpheus", "tara")
+    assert orpheus.supports_audio_tags and not orpheus.supports_cues and orpheus.params_for("excited") == {}
+
+
+def test_pod_preset() -> None:
+    """The RunPod pilot: vLLM's 27B next to the loop with thinking off, an open voice with Kokoro
+    behind it, and the voice's sounds still reaching the persona through the failover wrapper."""
+    from types import SimpleNamespace
+
+    from eva.config import VOICE_SERVER_SETTINGS, make_preset
+    from eva.factory import build_llm, build_tts
+    from eva.failover import FailoverTTS
+
+    p = make_preset("qwen27b-pod", "chatterbox")
+    assert p.settings is VOICE_SERVER_SETTINGS and p.tts_fallback == {"kind": "kokoro", "voice": "af_heart"}
+    assert p.settings.tts_parallelism == 1 and p.settings.first_chunk_min_chars < 40
+    llm = build_llm(p.llm)
+    try:
+        assert llm.base_url == "http://127.0.0.1:8100/v1" and llm.model == "qwen27b"
+        assert llm.extra_body["chat_template_kwargs"] == {"enable_thinking": False}
+    finally:
+        asyncio.run(llm.close())
+    orpheus = build_tts(make_preset("qwen27b-pod", "orpheus").tts)
+    wrapped = FailoverTTS(orpheus, SimpleNamespace(name="kokoro", sample_rate=24_000))
+    assert wrapped.sound_tags == orpheus.sound_tags and "laughs" in wrapped.sound_tags
+    assert make_preset("qwen4b", "kokoro").tts_fallback is None
+    cerebras = make_preset("qwen27b", "v3").llm  # the cloud 27B: its key from a file, reasoning low, room to think
+    assert cerebras["base_url"].startswith("https://api.cerebras.ai") and cerebras["key"][0] == "cerebras_api_key.txt"
+    assert cerebras["extra_body"] == {"reasoning_effort": "low"} and cerebras["max_tokens"] >= 2000

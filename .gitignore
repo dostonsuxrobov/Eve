@@ -18,3 +18,6 @@ openAI_api.txt
 !eva/assets/voices/*.wav
 **/voice/server.log
 usage.json
+
+# the dispatch job's generated world (python -m eva.jobs.dispatch.world)
+data/

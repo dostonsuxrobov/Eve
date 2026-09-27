@@ -349,6 +349,10 @@ class FailoverTTS:
     def supports_cues(self) -> bool:
         return bool(getattr(self.active, "supports_cues", False))
 
+    @property
+    def sound_tags(self) -> list[str] | None:  # the sounds the persona offers the brain (Orpheus)
+        return getattr(self.active, "sound_tags", None)
+
     async def warmup(self) -> None:
         await self.primary.warmup()
         self._warm_task = _warm_in_background(self.backup, "tts")

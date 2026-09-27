@@ -60,3 +60,34 @@ character ("A tree grows, a house stands. One lives, the other stays put."). The
 on as a net: it costs nothing when it doesn't fire, and in the brain bench the 4B did say "One
 sec, setting that timer" without the call and wrote `end_conversation{...}` as text, which these
 lines don't exercise.
+
+## The dispatcher on two backends (2026-09-27)
+
+`bench/dispatch_eval.py`: six scripted calls to Red Oak Transport's dispatcher (a lowball reefer
+load, a load running late into a strict receiver, a do-not-use broker with a rate too good, a hazmat
+load whose nearest driver has no endorsement, the owner asking for the best load home for a truck, a
+truck broken down with a reefer load due tomorrow), 17 caller lines, 26 fact checks from the tool
+calls, the database and her words. Typed caller lines; a fresh world per call.
+
+| backend | checks | first reply, median (range) | words per reply, median | cost of the 6 calls |
+|---|---|---|---|---|
+| Eva's loop: Cerebras Qwen3.8-27B (reasoning low), silent voice | 26/26 | 0.63 s (0.31-1.25) to her first sentence, before the voice | 74 | Cerebras tokens only (no voice in the bench) |
+| Gemini 3.8 Live, audio out | 26/26 | 1.9 s (0.7-6.9) to first audio, tool lookups included | 25 | $0.235 |
+
+* Eva's number is before the voice: add ElevenLabs' first audio (0.24-0.80 s measured above), and on a
+  live call the 0.5 s endpoint and Parakeet (0.2-1.1 s). Gemini's includes its own lookups.
+* A spoken caller into Gemini 3.8 Live (`bench/s2s_audio_check.py`, Kokoro's voice streamed in real
+  time): end of speech to first audio 2.49 s on a turn with a lookup, 1.50 s without; it heard
+  "P O seven seven eight one two three four" as "PO7781234" and looked the load up; $0.019 for two turns.
+* Both negotiate: they open at or above the target ($2,250-2,350 against a $1,900 offer, floor
+  $2,100) and give true reasons (lane market, a truck with no empty miles), but both drop to
+  $2,150-2,250 on the broker's first push. Both refuse the do-not-use broker with the real reason,
+  pick the hazmat driver 92 miles out over the unendorsed one in Houston, and tell the truth about
+  the breakdown with a recovery truck from Tulsa and a new time.
+* Found and fixed on the way: the 27B said "I'm calling them right now" about a receiver (no such
+  tool: `notify_facility` now sends a request whose answer is pending, and the persona says she
+  can't phone); on a recovery plan it spent its 800 tokens reasoning and said nothing (now 2,000);
+  Gemini tried to book a made-up posting id (the persona and the tool now say to search the board).
+* Open: the 27B talks too long for a phone (still a median of 63 words after "under about forty
+  words" in the persona: it narrates between lookup rounds); Gemini booked the owner's load
+  without asking him. OpenAI not run yet (no key on this machine).

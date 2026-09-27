@@ -22,6 +22,20 @@ on the Creator plan, renewing on the 28th); the session ends with the total, sav
 `usage.json`. Headphones make interrupting her reliable. Ctrl-C ends the session (she updates
 her memory of you first).
 
+## The dispatcher (a job on the same loop)
+
+Red Oak Transport's dispatcher: a fake carrier's database (trucks, drivers, brokers, a load board,
+GPS pings, lane rates) and the tools to book loads, negotiate and give updates. Play a broker.
+
+```
+.venv\Scripts\python.exe run.py --job dispatch --brain qwen27b --voice v3conv   # Eva's loop: Parakeet + Cerebras 27B + ElevenLabs
+.venv\Scripts\python.exe run_s2s.py gemini:gemini-3.8-live                        # one model hears and speaks (headphones)
+.venv\Scripts\python.exe run_s2s.py openai:gpt-realtime-2.1                      # needs openai_key.txt
+.venv\Scripts\python.exe run_s2s.py openai:gpt-realtime-2.1-mini
+.venv\Scripts\python.exe bench\dispatch_eval.py gemini:gemini-3.8-live           # six scripted calls, checked
+.venv\Scripts\python.exe -m eva.jobs.dispatch.world                               # a fresh world (bookings reset)
+```
+
 ## Measure
 
 ```

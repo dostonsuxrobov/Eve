@@ -20,6 +20,16 @@ GPU_TOTAL_MIB = 6141  # RTX 4050 laptop
 GPU_WARN_MIB = 5700  # above this the next allocation may spill into system RAM
 
 
+def gpu_total_mib() -> int | None:
+    """The card's memory as ``nvidia-smi`` reports it (the pod's 96 GB card, not the laptop's 6)."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return int(out.strip().splitlines()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
 def full_tag(model: str) -> str:
     """``ollama ps`` lists an untagged model as ``name:latest``."""
     return model if ":" in model.rsplit("/", 1)[-1] else model + ":latest"

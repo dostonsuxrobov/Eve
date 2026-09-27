@@ -26,6 +26,11 @@ USER_AGENT = "eva-voice-agent/0.3"
 # before falling back. Always use the IPv4 literal.
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 
+# The RunPod pilot (2026-09-27, deploy/runpod/): the brain in vLLM and the open voices in
+# voice/server.py, on the same GPU box as the loop, so only her audio crosses the internet.
+POD_LLM_URL = os.environ.get("EVA_POD_LLM_URL", "http://127.0.0.1:8100/v1")
+VOICE_SERVER_URL = os.environ.get("EVA_VOICE_SERVER_URL", "http://127.0.0.1:8765")
+
 # ElevenLabs, owner's plan (2026-09-26): Creator, billed annually, paid through 2027-07-28.
 # 121k credits a month; unused credits roll over for up to two months (balance at most 3x).
 # The key only has text_to_speech / speech_to_text (no models_read, voices_read, user_read),
@@ -35,6 +40,18 @@ PLAN_MONTHLY_CREDITS = 121_000
 PLAN_RENEWS_ON_DAY = 28  # the subscription date (2027-07-28): each month's credits arrive on the 28th
 PLAN_EXPIRES = "2027-07-28"
 CREDITS_WARN_AT = 0.8  # of the month's allowance
+
+
+def key_file(name: str, env: str) -> str | None:
+    """A key from ``env`` or the gitignored ``<name>`` file (its first line that looks like a key)."""
+    if os.environ.get(env):
+        return os.environ[env].strip()
+    path = ROOT / name
+    if not path.exists():
+        return None
+    lines = [ln.strip() for ln in path.read_text(encoding="utf-8-sig").splitlines() if ln.strip()]
+    keyish = [ln for ln in lines if " " not in ln and len(ln) >= 20]
+    return (keyish or lines or [None])[0]
 
 
 def elevenlabs_key() -> str | None:
@@ -115,6 +132,20 @@ class PipelineSettings:
 BRAINS: dict[str, dict[str, Any]] = {
     "qwen4b": {"kind": "ollama", "model": "qwen3:4b-instruct-2507-q4_K_M", "persona": "eva", "tool_gate": True,
                "label": "Qwen3 4B instruct, on this laptop (3.2 GB on the GPU, 56 tok/s)"},
+    # The cloud era's brain (6.2/10 in its eval, 6/6 tools, no scaffolding), open weights, on Cerebras.
+    # Reasoning "low": off, it cut 25-40 % of very short replies mid-word (archived eval).
+    "qwen27b": {"kind": "openai", "base_url": "https://api.cerebras.ai/v1", "model": "qwen-3.8-27b", "persona": "eva",
+                "key": ("cerebras_api_key.txt", "CEREBRAS_API_KEY"), "extra_body": {"reasoning_effort": "low"},
+                # 2000: at 800 a hard question (a recovery plan) spent it all on reasoning, nothing left to say
+                "temperature": 0.7, "max_tokens": 2000,
+                "label": "Qwen3.8-27B on Cerebras (open weights, cloud): the cloud era's brain"},
+    # The same model served by vLLM on the RunPod pod in FP8 (deploy/runpod/). Thinking off through the
+    # chat template; sampling from the model card.
+    "qwen27b-pod": {"kind": "openai", "base_url": POD_LLM_URL, "model": "qwen27b", "persona": "eva",
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}, "top_p": 0.8, "top_k": 20,
+                               "presence_penalty": 1.5},
+                "temperature": 0.7, "max_tokens": 600,
+                "label": "Qwen3.8-27B on the RunPod pod (vLLM, FP8)"},
 }
 DEFAULT_BRAIN = "qwen4b"
 
@@ -129,6 +160,13 @@ VOICES: dict[str, dict[str, Any]] = {
     "flash": {"kind": "elevenlabs", "model_id": "eleven_flash_v2_5", "voice": ELEVENLABS_VOICE,
               "label": "ElevenLabs Flash v2.5: the fastest, half the credits, no audio tags"},
     "kokoro": {"kind": "kokoro", "voice": "af_heart", "label": "Kokoro, on this laptop: no credits, flat"},
+    # Open voices behind voice/server.py, for the pod (on this laptop Chatterbox took 2.3-3.4 s to
+    # its first sound, .archive/local-variants/docs/MEASUREMENTS.md). Chatterbox clones
+    # eva/assets/voices/eva.wav and follows her delivery cue; Orpheus needs Ollama next to it.
+    "chatterbox": {"kind": "voice-server", "engine": "chatterbox", "voice": "eva",
+                   "label": "Chatterbox 0.5B (open): cloned voice, emotion strength follows her cue"},
+    "orpheus": {"kind": "voice-server", "engine": "orpheus", "voice": "tara",
+                "label": "Orpheus 3B 'tara' (open): laughs, sighs, gasps inline"},
 }
 DEFAULT_VOICE = "v3"
 
@@ -141,6 +179,12 @@ LOCAL_TTS: dict[str, Any] = {"kind": "kokoro", "voice": "af_heart"}  # the fallb
 ELEVENLABS_SETTINGS = PipelineSettings(
     endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
     first_chunk_min_chars=40, min_chunk_chars=20, tts_parallelism=1,
+)
+# The open voices on the pod: the same turn-taking, a shorter first chunk (Chatterbox renders a
+# whole chunk before its first sample, so a shorter one speaks sooner). Starting points, to measure.
+VOICE_SERVER_SETTINGS = PipelineSettings(
+    endpoint_silence_ms=500, filler_after_ms=800, backchannels=True,
+    first_chunk_min_chars=24, min_chunk_chars=12, tts_parallelism=1,
 )
 
 
@@ -164,6 +208,7 @@ def make_preset(brain: str = DEFAULT_BRAIN, voice: str = DEFAULT_VOICE) -> Prese
     llm = {k: val for k, val in b.items() if k not in ("label", "persona")}
     tts = {k: val for k, val in v.items() if k != "label"}
     cloud = v["kind"] == "elevenlabs"
+    served = v["kind"] == "voice-server"
     return Preset(
         name=f"{brain}+{voice}",
         description=f"Parakeet STT, {b['label']}; voice {v['label']}.",
@@ -171,6 +216,6 @@ def make_preset(brain: str = DEFAULT_BRAIN, voice: str = DEFAULT_VOICE) -> Prese
         llm=llm,
         tts=tts,
         persona=b.get("persona", "eva"),
-        settings=ELEVENLABS_SETTINGS if cloud else PipelineSettings(),
-        tts_fallback=dict(LOCAL_TTS) if cloud else None,
+        settings=ELEVENLABS_SETTINGS if cloud else VOICE_SERVER_SETTINGS if served else PipelineSettings(),
+        tts_fallback=dict(LOCAL_TTS) if cloud or served else None,
     )

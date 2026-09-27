@@ -3,14 +3,16 @@
 Imports are lazy so that optional heavy dependencies (sherpa-onnx, kokoro-onnx) are only
 loaded for the stack that needs them. The ears and the brain are local (Parakeet, Ollama); the
 voice is ElevenLabs, wrapped in ``eva.failover.FailoverTTS`` with Kokoro behind it when the
-preset names a fallback, so no internet or no credits means a local voice, not silence.
+preset names a fallback, so no internet or no credits means a local voice, not silence. On the
+RunPod pod (deploy/runpod/) the brain is vLLM ("openai") and the voice is voice/server.py
+("voice-server"), with the same Kokoro fallback.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .config import BRAINS, OLLAMA_BASE_URL, Preset, elevenlabs_key
+from .config import BRAINS, OLLAMA_BASE_URL, VOICE_SERVER_URL, Preset, elevenlabs_key, key_file
 from .interfaces import LLM, STT, TTS
 
 EventHandler = Callable[[str, dict[str, Any]], None]
@@ -46,6 +48,23 @@ def build_llm(cfg: dict[str, Any]) -> LLM:
             temperature=cfg.get("temperature", 0.8),
             options=cfg.get("options"),
         )
+    if kind == "openai":
+        # any OpenAI-compatible server; on the pod, vLLM next to the loop (no key)
+        from .llm.openai_compat import OpenAICompatLLM
+
+        model = cfg["model"]
+        key = key_file(*cfg["key"]) if cfg.get("key") else "none"
+        if not key:
+            raise RuntimeError(f"no key for {model}: put it in {cfg['key'][0]} or {cfg['key'][1]}")
+        return OpenAICompatLLM(
+            name=f"openai/{model}",
+            base_url=cfg["base_url"],
+            api_key=key,
+            model=model,
+            extra_body=cfg.get("extra_body"),
+            max_tokens=cfg.get("max_tokens", 400),
+            temperature=cfg.get("temperature", 0.8),
+        )
     raise ValueError(f"unknown llm kind {kind!r}")
 
 
@@ -69,6 +88,11 @@ def build_tts(cfg: dict[str, Any]) -> TTS:
             intra_threads=cfg.get("intra_threads"),
             lang=cfg.get("lang", "en-us"),
         )
+    if kind == "voice-server":
+        from .tts.voice_server import VoiceServerTTS
+
+        return VoiceServerTTS(cfg["engine"], cfg["voice"], cfg.get("base_url", VOICE_SERVER_URL),
+                              **({"level_dbfs": cfg["level_dbfs"]} if "level_dbfs" in cfg else {}))
     raise ValueError(f"unknown tts kind {kind!r}")
 
 

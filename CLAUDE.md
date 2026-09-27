@@ -37,6 +37,31 @@ she *sounds and feels*. Measurements own what is *true*: latency, VRAM, credits,
   every response reports into `usage.json`; the console shows it per turn and warns at 80 %.
 * **English only** (since 2026-09-23); the Russian persona and data are in the first archive.
 
+## The dispatch MVP (owner's direction, 2026-09-27)
+
+The owner wants a useful product in front of real users before any GPU spend: build the job layer
+(data, tools, behaviour, evals) on pay-per-use APIs, compare backends on quality first, cost later.
+The first job is **a truck dispatcher** for a fictional carrier, Red Oak Transport: book loads,
+negotiate rates, give updates.
+
+* **The job is data + tools on the same loop** (`eva/jobs/dispatch/`): `world.py` builds a fake SQLite
+  world (116 cities, 131 trucks, 140 drivers, 220 brokers, ~6k load-board postings, ~24k past loads,
+  ~72k GPS pings, lane rates, fuel, policy) with planted scenario rows; `desk.py` is 12 tools that
+  enforce the rules whatever the model says (cost floor, do-not-use brokers, hazmat endorsement,
+  trailer type, pickup window). Persona `eva/assets/personas/en/dispatcher.md`. A job session never
+  reads or writes the owner's personal memory.
+* **Backends, same persona and tools:** Eva's loop (`run.py --job dispatch --brain qwen27b --voice v3conv`:
+  Parakeet + Cerebras Qwen3.8-27B + ElevenLabs) and speech-to-speech (`run_s2s.py openai:gpt-realtime-2.1`,
+  `openai:gpt-realtime-2.1-mini`, `gemini:gemini-3.8-live`; `eva/s2s/`, raw WebSockets, prices in `eva/s2s/__init__.py`).
+  The owner allows closed models for these tests; the open-brain rule stands for Eva's own loop.
+* **Measure:** `bench/dispatch_eval.py <backend>` (six scripted calls, fresh world each, fact checks;
+  Cerebras ~50 completions a run, Gemini ~$0.25) and `bench/s2s_audio_check.py <backend>` (a spoken
+  caller). Results in docs/MEASUREMENTS.md.
+* **Keys** (gitignored, first key-looking line of the file): `cerebras_api_key.txt`, `google_api_key.txt`,
+  `openai_key.txt`, `elevenlabs_key.txt`.
+* **RunPod pilot scaffolding** (`deploy/runpod/`, `voice/server.py`, `qwen27b-pod`): written and tested
+  offline, never run on a pod. The pod was stopped and the owner moved to API-first.
+
 ## Credits are money
 
 * Anything that makes her speak through ElevenLabs spends credits: `run.py`, `bench/e2e_sim.py`
@@ -104,6 +129,9 @@ a voice failover, the credits a turn cost) prints a dim line saying why.
 
 ## Next (the owner orders it)
 
+0. **Dispatch MVP:** the owner talks to each backend and judges by ear; OpenAI runs once
+   `openai_key.txt` exists; Eva's 27B talks too long (median 63-74 words a reply against Gemini's 25);
+   then cost per call, a phone line, and a real design partner.
 1. **The voice by ear:** v3 vs v3 Conversational vs Flash on the new voice, in real sessions.
 2. **Latency:** end-of-turn prediction (SmartTurn) instead of the fixed 0.5 s wait; a streaming or
    faster STT for long utterances (Parakeet took 1.1 s on an 8 s one).

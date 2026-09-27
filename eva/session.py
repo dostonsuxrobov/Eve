@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
-from .config import MEMORY_FILE, Preset
+from .config import MEMORY_FILE, ROOT, Preset
 from .factory import Stack, build_stack
 from .interfaces import Tool
 from .lang import DEFAULT_MODE, LangPlan, plan as lang_plan
@@ -49,6 +49,7 @@ class Session:
     tool_args: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
     tool_router: Callable[[str], list[tuple[str, dict[str, Any]]]] | None = None
     credit_meter: Any = None  # eva.credits.CreditMeter when the voice is ElevenLabs
+    job: str | None = None  # eva.jobs: a work persona + tool set; no personal memory is read or written
 
     def agent_kwargs(self) -> dict[str, Any]:
         """The scaffolding every VoiceAgent of this session gets (run.py, the phone client, the benches)."""
@@ -77,6 +78,9 @@ class Session:
         return models
 
     def greeting_event(self, user_name: str) -> dict[str, Any]:
+        if self.job:
+            return {"type": "job_start", "message": "the call just connected. Answer the phone the way a dispatcher does: "
+                    "one short sentence with the company and your name, nothing else. Then wait for the caller."}
         return {"type": "session_start", "user_name": user_name, "lang": self.plan.primary.code, "language": self.plan.primary.name}
 
 
@@ -91,6 +95,7 @@ def build_session(
     mute_fillers: bool = False,
     memory_path: Any = MEMORY_FILE,
     on_event: EventHandler | None = None,
+    job: str | None = None,
 ) -> Session:
     """Build providers, persona prompt and memory for one session.
 
@@ -110,13 +115,18 @@ def build_session(
         meter = CreditMeter()
         stack.voice.meter = meter
 
+    if job:
+        from .jobs import job_persona, job_tools
+
+        persona = persona or job_persona(job)
     persona_obj = load_persona(persona or preset.persona, lang=plan.persona_lang)
-    memory = Memory(memory_path)
+    # a job never reads or writes the owner's personal memory: its own file, never saved (run.py)
+    memory = Memory(ROOT / "data" / f"{job}_memory.json" if job else memory_path)
     memory.load()
-    dropped = memory.drop_name_facts(user_name) if user_name else []
+    dropped = memory.drop_name_facts(user_name) if user_name and not job else []
     if dropped:
         memory.save()
-    tools = get_tools() if preset.llm.get("tools", True) else []
+    tools = (job_tools(job) if job else get_tools()) if preset.llm.get("tools", True) else []
     # small brains: the tool gate, the speech guard, the short tool note (eva/toolgate.py, eva/guard.py)
     gated = bool(preset.llm.get("tool_gate"))
     gate = ToolGate(home_city=home_city(memory.facts)) if gated else None
@@ -154,6 +164,7 @@ def build_session(
         tool_args=gate.fix_args if gate else None,
         tool_router=gate.route if gate else None,
         credit_meter=meter,
+        job=job,
     )
 
 

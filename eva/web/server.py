@@ -252,7 +252,7 @@ class WebServer:
             player.close()
             with contextlib.suppress(Exception):
                 await ws.close()
-            if agent.messages:
+            if agent.messages and not s.job:  # a job's calls never go into the owner's memory
                 try:
                     await asyncio.wait_for(
                         s.memory.update_from_transcript(s.llm, agent.messages, user_name=self.user_name), timeout=25
