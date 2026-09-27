@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -45,6 +46,8 @@ def printer(state: dict[str, Any]):
             console.print(f"\n[dim]  -> {data['name']}({escape(args)})[/]", end="")
         elif name == "tool_result":
             console.print(f"[dim] {data['ms']} ms[/]")
+        elif name in ("speech_started", "speech_stopped"):
+            console.print(f"\n[dim]  ({'heard you start' if name == 'speech_started' else 'you stopped'})[/]", end="")
         elif name == "barge_in":
             console.print(f"\n[dim]  (you cut in after {data['played_ms'] / 1000:.1f} s of her audio)[/]")
         elif name == "turn_done":
@@ -69,7 +72,7 @@ async def amain(args: argparse.Namespace) -> int:
     from eva.audio.mic import LinearResampler, Mic
     from eva.audio.player import Player
     from eva.audio.vad import SileroVAD
-    from eva.s2s import job_instructions, make_client
+    from eva.s2s import job_client
     from eva.s2s.driver import Call
 
     provider, _, model = args.backend.partition(":")
@@ -77,7 +80,6 @@ async def amain(args: argparse.Namespace) -> int:
         from eva.jobs.dispatch.world import build
 
         build()
-    prompt, tools = job_instructions(args.job, args.user_name)
     kw: dict[str, Any] = {}
     if args.voice:
         kw["voice"] = args.voice
@@ -85,11 +87,29 @@ async def amain(args: argparse.Namespace) -> int:
         # a 500 ms silence endpoint like Eva's loop; OpenAI's semantic VAD (--eagerness) waited up to 4 s
         # to be sure the caller was done: 5.0-5.3 s answers on the spoken dispatch calls (2026-09-27)
         kw.update({"turn_detection": "semantic_vad", "eagerness": args.eagerness} if args.eagerness else {"turn_detection": "server_vad"})
-    client = make_client(provider, model, prompt, tools, **kw)
+    client, tools = job_client(provider, model, args.job, args.user_name, **kw)
     player = Player(client.out_rate)
     player.start()
     state: dict[str, Any] = {}
-    call = Call(client, tools, player=player, on_event=printer(state))
+    log_dir = ROOT / "bench" / "out" / "sessions"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{time.strftime('%Y%m%d-%H%M%S')}_{args.backend.replace(':', '_').replace('+', '_')}.jsonl"
+    log_file = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 - closed at the end of the call
+    t_log = time.perf_counter()
+
+    def log(ev: dict[str, Any]) -> None:  # every event but the audio bytes, for "why didn't she ...?"
+        row = {"t": round(time.perf_counter() - t_log, 3), **{k: v for k, v in ev.items() if k != "pcm"}}
+        if ev["type"] == "audio":
+            row["bytes"] = len(ev["pcm"])
+        log_file.write(json.dumps(row, default=str) + "\n")
+
+    def on_event(name: str, data: dict[str, Any]) -> None:
+        show(name, data)
+        if name in ("tool", "tool_result", "barge_in", "error", "turn_done"):
+            log({"type": f"call.{name}", **{k: v for k, v in data.items() if k != "turn"}})
+
+    show = printer(state)
+    call = Call(client, tools, player=player, on_event=on_event, log=log)
     console.print(f"[bold]{client.name}[/] as the {args.job} desk. Connecting...")
     await call.start()
     console.print("[dim]connected. Headphones on; Ctrl-C to end.[/]")
@@ -110,11 +130,22 @@ async def amain(args: argparse.Namespace) -> int:
                     call.mark_start()
                     await client.send_text(line.strip())
         else:
-            mic = Mic(sample_rate=16000, frame_ms=32)  # 512 samples: one Silero window per frame
+            mic = Mic(device=args.input_device, sample_rate=16000, frame_ms=32)  # 512 samples: one Silero window per frame
             vad = SileroVAD()
             up = LinearResampler(16000, client.in_rate) if client.in_rate != 16000 else None
             speaking, silence_ms = False, 0
+            levels: list[float] = []
             async for frame in mic.frames():
+                if len(levels) < 94:  # the first ~3 s: is the mic hearing anything at all?
+                    levels.append(float(np.sqrt(np.mean(frame.astype(np.float32) ** 2))))
+                    if len(levels) == 94:
+                        db = lambda x: 20 * np.log10(max(x, 1.0) / 32768)  # noqa: E731
+                        loud = db(max(levels))
+                        console.print(f"\n[dim]  mic ({mic.native_rate} Hz): average {db(float(np.mean(levels))):.0f} dBFS, "
+                                      f"loudest {loud:.0f} dBFS over the first 3 s[/]")
+                        if loud < -55:
+                            console.print("[yellow]  the mic looks silent: pick another with --input-device "
+                                          "(python run.py --list-devices)[/]")
                 if call.closed or call.ended:
                     break
                 p = vad(frame)
@@ -129,7 +160,7 @@ async def amain(args: argparse.Namespace) -> int:
                 pcm = frame if up is None else np.clip(up.process(frame), -32768, 32767).astype(np.int16)
                 await client.send_audio(pcm.astype("<i2").tobytes())
         if call.ended:
-            await asyncio.sleep(max(0.5, player.buffered_seconds() + 0.3))
+            await asyncio.sleep(max(0.5, player.buffered_seconds + 0.3))
     except (asyncio.CancelledError, KeyboardInterrupt):
         pass
     finally:
@@ -137,6 +168,8 @@ async def amain(args: argparse.Namespace) -> int:
             mic.stop()
         await call.close()
         player.close()
+        log_file.close()
+        console.print(f"[dim]every event of this call: {log_path}[/]")
         console.print(f"\n[bold]session cost ${call.cost:.3f}[/] over {len(call.turns)} turns ({client.name})")
     return 0
 
@@ -150,6 +183,7 @@ def main() -> int:
     ap.add_argument("--text", action="store_true", help="type your lines instead of talking")
     ap.add_argument("--fresh", action="store_true", help="rebuild the dispatch world first")
     ap.add_argument("--user-name", default="Doston")
+    ap.add_argument("--input-device", type=int, help="microphone index (python run.py --list-devices)")
     args = ap.parse_args()
     try:
         return asyncio.run(amain(args))

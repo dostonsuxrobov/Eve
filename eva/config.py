@@ -123,6 +123,10 @@ class PipelineSettings:
     # long for the user to go on before answering; if they do, the pieces are merged into
     # one turn and no LLM call is wasted. 0 = off.
     incomplete_grace_ms: int = 600
+    # Text a brain writes in a round after a tool call is held until the round ends: spoken if it's
+    # the answer, dropped if another tool call follows (it was narration: "Let me check the broker,
+    # then I'll grab it"). Costs the time to finish the round (Cerebras: a fraction of a second).
+    hold_tool_narration: bool = False
 
 
 

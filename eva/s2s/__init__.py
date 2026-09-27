@@ -58,6 +58,29 @@ def make_client(provider: str, model: str, instructions: str, tools: list[Any], 
     raise ValueError(f"unknown provider {provider!r}")
 
 
+def live_instructions(job: str, user_name: str = "Doston") -> tuple[str, str]:
+    """GPT-Live's two prompts for a job, in OpenAI's recommended structure: the voice model's (role,
+    backchannel, interruption and delegation policies) and the backend's (procedures, rules, how to
+    return a result). Files: eva/assets/personas/en/<persona>_live.md and <persona>_backend.md."""
+    from ..jobs import job_persona
+    from ..personas import load_persona, now_string, render
+
+    out = []
+    for part in ("live", "backend"):
+        out.append(render(load_persona(f"{job_persona(job)}_{part}"), supports_audio_tags=False, memory_text="",
+                          now=now_string(), user_name=user_name, tool_notes=""))
+    return out[0], out[1]
+
+
+def job_client(provider: str, model: str, job: str = "dispatch", user_name: str = "Doston", **kw: Any) -> tuple[Any, list[Any]]:
+    """A speech-to-speech client with the job's persona and tools (GPT-Live gets its two prompts)."""
+    prompt, tools = job_instructions(job, user_name)
+    if provider == "openai-live":
+        prompt, backend = live_instructions(job, user_name)
+        kw["backend_instructions"] = backend
+    return make_client(provider, model, prompt, tools, **kw), tools
+
+
 def job_instructions(job: str, user_name: str = "Doston") -> tuple[str, list[Any]]:
     """The job's persona rendered for a voice that takes no bracketed tags, and its tools."""
     from ..jobs import job_persona, job_tools

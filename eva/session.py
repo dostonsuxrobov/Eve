@@ -138,12 +138,12 @@ def build_session(
     gate = ToolGate(home_city=home_city(memory.facts)) if gated else None
     system_prompt = render(
         persona_obj,
-        supports_audio_tags=stack.tts.supports_audio_tags,
+        supports_audio_tags=stack.tts.supports_audio_tags and not job,  # a dispatcher doesn't laugh or sigh on cue
         memory_text=memory.as_prompt_text(subject=user_name or "They"),
         now=datetime.now().strftime("%A %d %B %Y, %H:%M"),
         user_name=user_name,
         tool_notes=GATED_TOOL_NOTES if (gated and tools) else tool_notes(tools),
-        delivery_cues=bool(getattr(stack.tts, "supports_cues", False)),
+        delivery_cues=bool(getattr(stack.tts, "supports_cues", False) or (job and stack.tts.supports_audio_tags)),
         locked_language=plan.primary.name if plan.locked else None,
         languages=[lang.name for lang in plan.active],
         sounds=getattr(stack.tts, "sound_tags", None),
@@ -157,9 +157,9 @@ def build_session(
         hints[persona_obj.lang] = list(persona_obj.tool_hints)
     if persona_obj.backchannels:
         backchannels[persona_obj.lang] = list(persona_obj.backchannels)
-    if mute_fillers:
+    if mute_fillers or job:
         fillers = {}
-    if not preset.settings.backchannels:
+    if not preset.settings.backchannels or job:
         backchannels = {}
     return Session(
         preset=preset, plan=plan, stack=stack, persona=persona_obj, memory=memory, tools=tools,

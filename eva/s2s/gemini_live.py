@@ -101,11 +101,12 @@ class GeminiLive:
         setup = {"setup": {
             "model": f"models/{self.model}", "generationConfig": gen,
             "systemInstruction": {"parts": [{"text": self.instructions}]},
-            "tools": [{"functionDeclarations": declarations(self.tools, self.behavior)}],
             "inputAudioTranscription": {}, "outputAudioTranscription": {},
             "realtimeInputConfig": {"activityHandling": "START_OF_ACTIVITY_INTERRUPTS"},
             "contextWindowCompression": {"slidingWindow": {}},
         }}
+        if self.tools:  # an empty declaration list is refused
+            setup["setup"]["tools"] = [{"functionDeclarations": declarations(self.tools, self.behavior)}]
         await self.ws.send(json.dumps(setup))
         first = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=20))
         if "setupComplete" not in first:

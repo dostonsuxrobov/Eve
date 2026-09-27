@@ -63,6 +63,15 @@ negotiate rates, give updates.
   `bench/dispatch_table.py` (one table). A full round of all tiers cost ~$6 OpenAI + ~$1.5 Google.
   Results in docs/MEASUREMENTS.md. OpenAI realtime runs with a 500 ms silence endpoint: the default
   semantic VAD waited up to 4 s.
+* **Work calls get no companion extras** (owner, 2026-09-27: "a lot of fillers ... we probably overdosed
+  with scaffolding"): `eva.jobs.job_settings` turns off the 0.8 s filler and the backchannels, and holds
+  what the brain writes between lookups until the round ends (dropped if another lookup follows); the
+  dispatcher gets delivery cues on v3 but no sound effects.
+* **GPT-Live** (the owner's favourite for realism) gets two prompts in OpenAI's recommended structure:
+  `dispatcher_live.md` (role, backchannel / interruption / delegation policies, the backend's tools)
+  and `dispatcher_backend.md` (procedures, rules, how to return a result).
+* **Voices by ear:** `bench/voices.py render|play gemini|openai|live` renders one dispatcher line in every
+  voice to `samples/out/voices/`; pick one with `dispatch.py <variant> --voice <name>`.
 * **Keys** (gitignored, first key-looking line of the file): `cerebras_api_key.txt`, `google_api_key.txt`,
   `openai_key.txt`, `elevenlabs_key.txt`.
 * **RunPod pilot scaffolding** (`deploy/runpod/`, `voice/server.py`, `qwen27b-pod`): written and tested
@@ -124,6 +133,10 @@ a voice failover, the credits a turn cost) prints a dim line saying why.
   to the scratchpad with the Write tool and run them. Foreground `sleep` does not wait.
 * Files that came from the archive may have CRLF endings (`eva/assets/personas/en/eva.md`):
   rewriting them with `\n` makes git show every line changed. Keep the file's own endings.
+* `Player.buffered_samples`, `played_seconds`, `buffered_seconds` are properties. Calling one raised
+  inside the speech-to-speech event loop on OpenAI's first `speech_started` and the call stopped
+  hearing after the greeting (2026-09-27); the loop now survives any handler error with a red line.
+  Tests without a player never reach that code: keep a player-backed test for every barge-in path.
 * The phone client (`run.py --web --tls`): browsers allow the mic only on https (self-signed
   certificate via Git's openssl); its AudioWorklets are template strings, so no backticks inside.
 

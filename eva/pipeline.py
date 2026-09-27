@@ -1296,6 +1296,8 @@ class VoiceAgent:
         m = turn.metrics
         prefill_pending = prefill
         seen: set[str] = {j.raw.strip().lower() for j in turn.chunks if j.raw}
+        hold = self.settings.hold_tool_narration and round_no >= 1
+        held: list[str] = []
 
         def accept(chunk: str) -> None:
             chunk, recovered = _recover_tool_calls(chunk, self.tools if turn.tools is None else turn.tools, turn.recovered_seq)
@@ -1310,6 +1312,9 @@ class VoiceAgent:
                 self._emit("chunk_dropped", {"reason": "duplicate", "text": chunk})
                 return
             seen.add(key)
+            if hold:
+                held.append(chunk)
+                return
             kept = self._enqueue(turn, jobs, round_no, chunk)
             if kept:
                 raw_parts.append(kept)
@@ -1358,6 +1363,13 @@ class VoiceAgent:
             push(tail)
         for c in chunker.flush():
             accept(c)
+        if held and tool_calls:
+            self._emit("narration_dropped", {"round": round_no, "text": " ".join(held)[:200]})
+        elif held:
+            for c in held:
+                kept = self._enqueue(turn, jobs, round_no, c)
+                if kept:
+                    raw_parts.append(kept)
         return " ".join(p.strip() for p in raw_parts if p.strip()), tool_calls
 
     def _enqueue(

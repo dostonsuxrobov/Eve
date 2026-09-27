@@ -131,3 +131,27 @@ VAD answered in 5.0-5.3 s on the first spoken run. A call here is 2-4 turns and 
   ignores spacing, dashes and case and falls back to the digits (`test_a_reference_is_found_however_it_was_heard`).
 * Cost of this round, from the saved reports: about $5.90 OpenAI and $1.50 Google (a little more
   with the replaced reruns). GPT-Live bills $0.05 a minute of session plus the backend's tokens.
+
+## The owner's first live sessions, and what they changed (2026-09-27)
+
+* **gpt-realtime-2.1 "can't hear me at all"**: the driver called `Player.buffered_samples()` and
+  `played_seconds()`, which are properties; the TypeError on OpenAI's first `speech_started` (his
+  first word) killed the event loop, so nothing after her greeting was processed. The evals never
+  had a player. Fixed; `test_barge_in_with_a_player_keeps_the_call_alive` fails on the old code.
+  Checked first that it wasn't the audio: quiet synthetic speech at -26 and -38 dBFS through the live
+  path (16 kHz mic -> 24 kHz) was heard and transcribed with near-field and far-field noise reduction
+  alike. The live runner now prints the mic level after 3 s, "heard you start / you stopped", and
+  writes every event to `bench/out/sessions/`; OpenAI's noise reduction is far-field (laptop mic).
+  Re-run through `run_s2s.py`'s own code with a recorded caller: heard, looked up, answered in 1.1-1.2 s.
+* **Gemini's voices "robotic"**: `bench/voices.py` rendered one dispatcher line in every voice: 30
+  Gemini Live, 10 OpenAI realtime, 11 of 12 GPT-Live (`delta` gave only silence twice) for $0.45, in
+  `samples/out/voices/`.
+* **eva-v3 "a lot of fillers ... overdosed with scaffolding"**: work calls now get no 0.8 s filler,
+  no backchannels and no sound tags, and what the 27B writes between lookups is held until the round
+  ends and dropped when another lookup follows (`narration_dropped`). On three calls it still passes
+  all checks, but its replies stay long: 44-108 words.
+* **GPT-Live tools**: two prompts in OpenAI's recommended structure (`dispatcher_live.md` with the
+  delegation policy, `dispatcher_backend.md` with the procedures) and a spoken "checking" when the
+  backend is still busy 2 s after a hand-off (it had left a 12.6 s silence on a broker's counter-offer).
+  Six spoken calls: 28/28, first word 1.16 s median, 3.38 s p90, $0.195 a call; the lowball call again
+  after the check-in: 6/6, 0.87-2.03 s.

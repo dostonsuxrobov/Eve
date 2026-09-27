@@ -139,6 +139,8 @@ class StatusPrinter:
             console.print(f"[dim]  (filler #{data['index']} at +{data['after_s']:.2f}s)[/]")
         elif name == "sentence_dropped":
             console.print(f"[dim]  (didn't say \"{escape(data['text'])}\": {escape(data['reason'])})[/]")
+        elif name == "narration_dropped":
+            console.print(f"[dim]  (didn't say \"{escape(data['text'])}\": narration between lookups)[/]")
         elif name == "tools_routed":
             console.print(f"[dim]  (asked plainly, so I'm looking it up first: {escape(', '.join(data['names']))})[/]")
         elif name == "reply_retry":
@@ -266,6 +268,10 @@ async def amain(args: argparse.Namespace) -> int:
         mute_fillers=args.mute_fillers, on_event=printer, job=args.job,
     )
     printer.meter = session.credit_meter
+    if session.job:
+        from eva.jobs import job_settings
+
+        settings = job_settings(settings)
     if session.credit_meter is not None:
         console.print(f"[dim]{session.credit_meter.line()}[/]")
     stt, llm, tts = session.stt, session.llm, session.tts

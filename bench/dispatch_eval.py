@@ -60,6 +60,42 @@ def said(rec: list[dict[str, Any]], i: int | None = None) -> str:
     return " ".join(t["said"] for t in turns).lower().replace("’", "'").replace("‘", "'")
 
 
+UNITS = {"zero": 0, "oh": 0, "o": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+         "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+         "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19}
+TENS = {"twenty": 2, "thirty": 3, "forty": 4, "fifty": 5, "sixty": 6, "seventy": 7, "eighty": 8, "ninety": 9}
+
+
+def spoken_digits(text: str) -> str:
+    """Digits as said on a phone, runs joined: "R O forty-eight three o eight" -> "048308",
+    "twenty-two seventy-five" -> "2275", "RO-48308" -> "48308". Other words separate runs."""
+    out, run, tens = [], "", False
+    for tok in re.findall(r"[a-z]+|\d+", text.lower().replace("-", " ")):
+        if tok in UNITS and tens and 1 <= UNITS[tok] <= 9:
+            run += str(UNITS[tok])  # "forty" "eight" -> 48
+            tens = False
+            continue
+        if tens:
+            run += "0"  # "forty" on its own -> 40
+            tens = False
+        if tok.isdigit():
+            run += tok
+        elif tok in TENS:
+            run += str(TENS[tok])
+            tens = True
+        elif tok in UNITS:
+            run += str(UNITS[tok])
+        elif run:
+            out.append(run)
+            run = ""
+    if tens:
+        run += "0"
+    if run:
+        out.append(run)
+    return " ".join(out)
+
+
+
 def no_phantom_booking(rec: list[dict[str, Any]]) -> bool:
     """She never gives a load number or says it's booked without a booking the tool confirmed
     (Gemini 3.1 Flash Live said "our load number is 10037" with no booking, 2026-09-27)."""
@@ -95,7 +131,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             "never offered to book below the floor": lambda r: all(int(c["args"].get("rate", 0)) >= 2100 for c in calls(r, "book_load")),
             "booked at 2,100-2,275 on a reefer": lambda r: any(2100 <= b["rate"] <= 2275 for b in booked(r)),
             "no booking claimed without one": no_phantom_booking,
-            "read back the load number": lambda r: bool(booked(r)) and (booked(r)[0]["load_number"][3:] in said(r).replace(",", "").replace(" ", "")
+            "read back the load number": lambda r: bool(booked(r)) and (booked(r)[0]["load_number"][3:] in spoken_digits(said(r))
                                                                         or "load number" in said(r)),
         },
     },
@@ -219,7 +255,9 @@ async def run_eva(brain: str, lines: list[str]) -> list[dict[str, Any]]:
         tools_log.append({"name": tc.name, "args": tc.arguments, "result": out, "ms": int((time.perf_counter() - t0) * 1000)})
         return out
 
-    settings = dataclasses.replace(s.preset.settings, filler_after_ms=0)
+    from eva.jobs import job_settings
+
+    settings = job_settings(s.preset.settings)
     agent = VoiceAgent(MockSTT([]), s.llm, tts, s.system_prompt, s.tools, settings, frames=None, segmenter=None,
                        player=MockPlayer(tts.sample_rate), on_event=EventLog(False), tool_executor=executor,
                        languages=s.plan.codes, **s.agent_kwargs())
@@ -295,14 +333,13 @@ async def spoken(line: str, rate: int, voice: str) -> bytes:
 async def run_s2s_audio(provider: str, model: str, lines: list[str], voice: str) -> list[dict[str, Any]]:
     """The caller speaks: each line streamed at real-time pace in 20 ms chunks, then silence, the way
     a phone line sends it. Latency is from the end of the caller's speech to her first audio."""
-    from eva.s2s import job_instructions, make_client
+    from eva.s2s import job_client
     from eva.s2s.driver import Call
 
-    prompt, tools = job_instructions("dispatch")
     # OpenAI's default semantic VAD waits up to 4 s to be sure the caller is done (5.0-5.3 s answers in the
     # first spoken run); a 500 ms silence endpoint is what Eva's loop and a phone call expect
     kw: dict[str, Any] = {"turn_detection": "server_vad"} if provider == "openai" else {}
-    client = make_client(provider, model, prompt, tools, **kw)
+    client, tools = job_client(provider, model, **kw)
     call = Call(client, tools)
     await call.start()
     n = client.in_rate // 50

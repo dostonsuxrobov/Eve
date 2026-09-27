@@ -35,6 +35,8 @@ GPS pings, lane rates) and the tools to book loads, negotiate and give updates. 
 .venv\Scripts\python.exe dispatch.py gemini-live-thinking
 .venv\Scripts\python.exe dispatch.py --eval gemini-live --audio      # six spoken calls, checked
 .venv\Scripts\python.exe bench\dispatch_table.py                     # every result in one table
+.venv\Scripts\python.exe bench\voices.py play gemini                  # hear every Gemini voice (openai, live too)
+.venv\Scripts\python.exe dispatch.py gemini-live --voice Puck         # talk with the one you liked
 .venv\Scripts\python.exe -m eva.jobs.dispatch.world                  # a fresh world (bookings reset)
 ```
 

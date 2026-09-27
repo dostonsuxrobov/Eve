@@ -211,8 +211,14 @@ def test_the_dispatcher_speaks_in_its_own_elevenlabs_voice(tmp_path: Path) -> No
     from eva.jobs import JOB_VOICES
     from eva.session import build_session
 
+    from eva.jobs import job_settings
+
     job = build_session(make_preset("qwen4b", "v3"), user_name="Doston", job="dispatch")
     assert job.stack.voice.voice_id == JOB_VOICES["dispatch"] and job.stack.voice.warm_voice
+    # no companion extras on a work call (owner: "a lot of fillers ... overdosed with scaffolding")
+    assert job.fillers == {} and job.backchannels == {} and "Never write sound tags" in job.system_prompt
+    s = job_settings(job.preset.settings)
+    assert s.filler_after_ms == 0 and not s.backchannels and s.hold_tool_narration and job.preset.settings.filler_after_ms > 0
     mine = build_session(make_preset("qwen4b", "v3"), user_name="Doston", memory_path=tmp_path / "m.json")
     assert mine.stack.voice.voice_id == ELEVENLABS_VOICE and not mine.stack.voice.warm_voice
 
@@ -224,3 +230,45 @@ def test_a_reference_is_found_however_it_was_heard(desk: Desk) -> None:
     for said in ("PHX-55120", "PHX55120", "phx 55120", "PAX 55,120", "55120"):
         assert j(desk.load_status(said))["load"] == PLANTED["broken_load"], said
     assert "error" in j(desk.load_status("PH-556120"))
+
+
+def test_barge_in_with_a_player_keeps_the_call_alive() -> None:
+    """The owner's first OpenAI realtime session (2026-09-27) never heard him: its speech_started, sent
+    at his first word, called the Player's properties as methods, the event loop died, and nothing
+    after the greeting was processed. Now: playback stops, her reply is truncated at what was played,
+    and the call keeps handling events."""
+    from eva.audio.player import Player
+    from eva.s2s.driver import Call
+
+    class Fake:
+        out_rate = 24000
+        cost = 0.0
+        audio_item = "item_1"
+
+        def __init__(self) -> None:
+            self.events: asyncio.Queue = asyncio.Queue()
+            self.truncated: list[int] = []
+
+        async def connect(self) -> None:
+            pass
+
+        async def truncate(self, ms: int) -> None:
+            self.truncated.append(ms)
+
+        async def close(self) -> None:
+            pass
+
+    async def go() -> None:
+        fake = Fake()
+        player = Player(24000)  # not started: nothing is played, buffered audio just waits
+        call = Call(fake, [], player=player)
+        await call.start()
+        fake.events.put_nowait({"type": "audio", "pcm": b"\x10\x00" * 24000})  # a second of her voice queued
+        fake.events.put_nowait({"type": "speech_started"})
+        fake.events.put_nowait({"type": "text_in", "text": "Where's my load?"})
+        await asyncio.sleep(0.2)
+        assert fake.truncated == [0] and player.buffered_samples == 0 and call.turn.interrupted
+        assert call.turn.heard == "Where's my load?" and not call.errors  # still listening after the barge-in
+        await call.close()
+
+    asyncio.run(go())

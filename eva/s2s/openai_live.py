@@ -42,15 +42,20 @@ class OpenAILive:
     out_rate = 24_000
 
     def __init__(self, model: str, instructions: str, tools: list[Any], *, voice: str = "gleam",
-                 backend: str = "gpt-5.6-luna", reasoning: str = "low", quiet_s: float = 1.2, **_: Any) -> None:
+                 backend: str = "gpt-5.6-luna", reasoning: str = "low", quiet_s: float = 1.2,
+                 backend_instructions: str | None = None, **_: Any) -> None:
         self.model = model
         self.backend = backend
         self.name = f"openai/{model}+{backend}"
         self.instructions = instructions
+        # with its own backend prompt the voice prompt already carries the delegation policy; without,
+        # the backend gets the voice prompt and the voice a note to delegate (the first version)
+        self.backend_instructions = backend_instructions
         self.tools = tools
         self.voice = voice
         self.reasoning = reasoning
         self.quiet_s = quiet_s
+        self.cover_after_s = 2.0
         self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.ws: Any = None
         self._reader: asyncio.Task[None] | None = None
@@ -74,14 +79,14 @@ class OpenAILive:
             raise RuntimeError("no OpenAI key: put it in openai_key.txt or OPENAI_API_KEY")
         self.ws = await connect(URL, additional_headers={"Authorization": f"Bearer {key}"}, max_size=None, ping_interval=None)
         backend: dict[str, Any] = {
-            "model": self.backend, "instructions": self.instructions,
+            "model": self.backend, "instructions": self.backend_instructions or self.instructions,
             "tools": [{"type": "function", "name": t.name, "description": t.description, "parameters": t.parameters} for t in self.tools],
             "tool_choice": "auto", "parallel_tool_calls": True,
         }
         if self.reasoning:
             backend["reasoning"] = {"effort": self.reasoning}
         await self._send({"type": "session.start", "event_id": "start", "session": {
-            "model": self.model, "instructions": self.instructions + LIVE_NOTE,
+            "model": self.model, "instructions": self.instructions + ("" if self.backend_instructions else LIVE_NOTE),
             "audio": {"format": {"type": "audio/pcm", "rate": 24000}, "output": {"voice": self.voice}},
             "delegation": {"type": "responses", "responses": backend},
         }})
@@ -133,6 +138,7 @@ class OpenAILive:
                 elif t == "session.delegation.created":
                     rid = ev.get("response_id") or ev.get("delegation_id") or "?"
                     self._busy.add(rid)
+                    asyncio.create_task(self._cover_the_wait(time.perf_counter()))
                 elif t == "response.event":
                     self._backend(ev.get("event") or {})
                 elif t == "error":
@@ -144,6 +150,18 @@ class OpenAILive:
         except Exception as e:  # noqa: BLE001
             put({"type": "error", "message": f"connection closed: {e!r}"})
         put({"type": "closed"})
+
+    async def _cover_the_wait(self, since: float) -> None:
+        """A backend answer can take a while (12.6 s of silence on a broker's counter-offer, 2026-09-27):
+        if she hasn't said anything 2 s after handing work off, have her say she's checking."""
+        await asyncio.sleep(self.cover_after_s)
+        if self._busy and self._last_out < since:
+            try:
+                await self._send({"type": "session.commentary.append", "delegation_id": None,
+                                  "content": "Still checking that in the system; tell the caller briefly, in your own words."})
+                self.events.put_nowait({"type": "covered_wait"})
+            except Exception:  # noqa: BLE001 - the call may be closing
+                pass
 
     def _backend(self, e: dict[str, Any]) -> None:
         t = e.get("type", "")

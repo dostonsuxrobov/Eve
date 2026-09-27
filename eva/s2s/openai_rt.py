@@ -47,7 +47,7 @@ class OpenAIRealtime:
 
     def __init__(self, model: str, instructions: str, tools: list[Any], *, voice: str = "marin",
                  turn_detection: str | None = "semantic_vad", eagerness: str = "auto", reasoning: str | None = "low",
-                 text_only: bool = False) -> None:
+                 text_only: bool = False, noise: str | None = "far_field") -> None:
         self.model = model
         self.name = f"openai/{model}"
         self.instructions = instructions
@@ -57,6 +57,7 @@ class OpenAIRealtime:
         self.eagerness = eagerness
         self.reasoning = reasoning
         self.text_only = text_only
+        self.noise = noise  # far_field for a laptop's mic array, near_field for a headset mic (OpenAI's docs)
         self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.ws: Any = None
         self._reader: asyncio.Task[None] | None = None
@@ -77,7 +78,7 @@ class OpenAIRealtime:
         session: dict[str, Any] = {
             "type": "realtime", "instructions": self.instructions,
             "output_modalities": ["text"] if self.text_only else ["audio"],
-            "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}, "noise_reduction": {"type": "near_field"},
+            "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}, "noise_reduction": {"type": self.noise} if self.noise else None,
                                 "transcription": {"model": "gpt-4o-mini-transcribe", "language": "en"}, "turn_detection": td},
                       "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": self.voice}},
             "tools": tool_schema(self.tools), "tool_choice": "auto",

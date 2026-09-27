@@ -9,6 +9,15 @@ JOBS = ("dispatch",)
 JOB_VOICES = {"dispatch": "GZ4PpFJV8ikEGUtBrjK7"}
 
 
+def job_settings(settings: Any) -> Any:
+    """A work call gets none of the companion's extras (owner, 2026-09-27: "a lot of fillers ... we
+    probably overdosed with scaffolding"): no "hmm" after 0.8 s of silence, no "mm-hm" while the
+    caller talks, and no narration between lookups."""
+    import dataclasses
+
+    return dataclasses.replace(settings, filler_after_ms=0, backchannels=False, hold_tool_narration=True)
+
+
 def job_tools(job: str) -> list[Any]:
     if job == "dispatch":
         from .dispatch.desk import dispatch_tools

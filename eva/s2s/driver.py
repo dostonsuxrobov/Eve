@@ -36,8 +36,11 @@ class Turn:
 
 
 class Call:
-    def __init__(self, client: Any, tools: list[Any], *, player: Any = None, on_event: EventHandler | None = None) -> None:
+    def __init__(self, client: Any, tools: list[Any], *, player: Any = None, on_event: EventHandler | None = None,
+                 log: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.client = client
+        self.log = log  # every event from the model (run_s2s.py writes them to bench/out/sessions/)
+        self._item: Any = None
         self.tools = tools
         self.player = player
         self.on_event = on_event or (lambda name, data: None)
@@ -82,52 +85,74 @@ class Call:
         while True:
             ev = await c.events.get()
             self.last_event_t = time.perf_counter()
-            t = ev["type"]
-            now = time.perf_counter() - self.turn.t_start
-            if t == "audio":
-                pcm = np.frombuffer(ev["pcm"], np.int16)
-                if pcm.size and float(np.sqrt(np.mean(pcm.astype(np.float32) ** 2))) > 184:  # -45 dBFS: speech, not silence
-                    self.turn.voiced.append(self.last_event_t)
-                if self.turn.first_audio_s is None:
-                    self.turn.first_audio_s = now
-                    self.on_event("first_audio", {"s": now})
-                self._audio_bytes += len(ev["pcm"])
-                if self.player is not None:
-                    self.player.write(ev["pcm"])
-            elif t == "text_out":
-                if self.turn.first_text_s is None:
-                    self.turn.first_text_s = now
-                self.turn.said += ev["delta"]
-                self.on_event("text_out", {"delta": ev["delta"]})
-            elif t == "text_in":
-                self.turn.heard = ev["text"]
-                self.on_event("text_in", {"text": ev["text"]})
-            elif t == "text_in_part":
-                self._heard_parts.append(ev["text"])
-            elif t in ("speech_started", "interrupted"):
-                if self.player is not None and self.player.buffered_samples() > 0:
-                    played_ms = int(self.player.played_seconds() * 1000)
-                    self.player.stop()
-                    self.turn.interrupted = True
-                    await c.truncate(played_ms)
-                    self.on_event("barge_in", {"played_ms": played_ms})
-            elif t == "tool_calls":
-                self.pending_tools += 1
-                asyncio.create_task(self._run_tools(ev["calls"]))
-            elif t == "turn_done":
-                self.turn.cost += ev.get("cost", 0.0)
-                self.turn.status = ev.get("status", "")
-                if not ev.get("more") and self.pending_tools == 0:
-                    self.turn.done_s = now
-                    self.turn_done.set()
-                    self.on_event("turn_done", {"cost": ev.get("cost", 0.0), "status": self.turn.status})
-            elif t == "error":
-                self.errors.append(ev["message"])
-                self.on_event("error", {"message": ev["message"]})
-            elif t == "closed":
-                self.closed = True
+            if self.log is not None:
+                self.log(ev)
+            try:
+                if await self._handle(ev):
+                    return
+            except Exception as e:  # noqa: BLE001 - a dead loop is a call that silently stops hearing
+                self.errors.append(repr(e))
+                self.on_event("error", {"message": f"call loop: {e!r} (on {ev.get('type')})"})
+
+    async def _handle(self, ev: dict[str, Any]) -> bool:
+        """One event from the model; True when the connection closed."""
+        c = self.client
+        t = ev["type"]
+        now = time.perf_counter() - self.turn.t_start
+        if t == "audio":
+            pcm = np.frombuffer(ev["pcm"], np.int16)
+            if pcm.size and float(np.sqrt(np.mean(pcm.astype(np.float32) ** 2))) > 184:  # -45 dBFS: speech, not silence
+                self.turn.voiced.append(self.last_event_t)
+            if self.turn.first_audio_s is None:
+                self.turn.first_audio_s = now
+                self.on_event("first_audio", {"s": now})
+            self._audio_bytes += len(ev["pcm"])
+            if self.player is not None:
+                item = getattr(c, "audio_item", None)
+                if item != self._item:  # a new reply: count what she plays of it, for a barge-in's truncate
+                    self._item = item
+                    self.player.mark()
+                self.player.write(ev["pcm"])
+        elif t == "text_out":
+            if self.turn.first_text_s is None:
+                self.turn.first_text_s = now
+            self.turn.said += ev["delta"]
+            self.on_event("text_out", {"delta": ev["delta"]})
+        elif t == "text_in":
+            self.turn.heard = ev["text"]
+            self.on_event("text_in", {"text": ev["text"]})
+        elif t == "text_in_part":
+            self._heard_parts.append(ev["text"])
+        elif t in ("speech_started", "interrupted"):
+            self.on_event(t, {})
+            # properties, not methods: calling them raised on OpenAI's first speech_started and killed
+            # this loop, so the call stopped hearing after the greeting (owner's session, 2026-09-27)
+            if self.player is not None and self.player.buffered_samples > 0:
+                played_ms = int(self.player.played_seconds * 1000)
+                self.player.stop()
+                self.turn.interrupted = True
+                await c.truncate(played_ms)
+                self.on_event("barge_in", {"played_ms": played_ms})
+        elif t == "tool_calls":
+            self.pending_tools += 1
+            asyncio.create_task(self._run_tools(ev["calls"]))
+        elif t == "turn_done":
+            self.turn.cost += ev.get("cost", 0.0)
+            self.turn.status = ev.get("status", "")
+            if not ev.get("more") and self.pending_tools == 0:
+                self.turn.done_s = now
                 self.turn_done.set()
-                return
+                self.on_event("turn_done", {"cost": ev.get("cost", 0.0), "status": self.turn.status})
+        elif t == "error":
+            self.errors.append(ev["message"])
+            self.on_event("error", {"message": ev["message"]})
+        elif t == "closed":
+            self.closed = True
+            self.turn_done.set()
+            return True
+        elif t == "speech_stopped":
+            self.on_event(t, {})
+        return False
 
     async def _run_tools(self, calls: list[tuple[str, str, dict[str, Any]]]) -> None:
         async def one(call_id: str, name: str, args: dict[str, Any]) -> tuple[str, str, str]:

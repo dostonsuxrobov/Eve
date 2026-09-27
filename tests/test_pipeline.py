@@ -1084,6 +1084,38 @@ async def _run_tool(tc: Any, tools: list[Tool]) -> str:
     return str(tool.fn(**tc.arguments))
 
 
+async def scenario_tool_narration_held(verbose: bool) -> tuple[Check, dict[str, Any]]:
+    """(ze) a work call (eva.jobs.job_settings): what the brain writes between two lookups is
+    narration ("Let me check the broker too, then I'll grab it", owner: "talks weird things") and is
+    never spoken; the first "one sec" and the final answer are. Without the setting all three are."""
+    c = Check()
+    results: dict[str, Any] = {}
+
+    async def lookup(what: str = "") -> str:
+        return f"found {what}"
+
+    tools = [Tool(name="lookup", description="Look something up.",
+                  parameters={"type": "object", "properties": {"what": {"type": "string"}}, "required": []}, fn=lookup)]
+    for hold in (True, False):
+        player = MockPlayer(24_000)
+        log = EventLog(verbose, player)
+        llm = MockLLM([ScriptedToolCall("lookup", {"what": "load"}, preface="One sec.", id="c1"),
+                       ScriptedToolCall("lookup", {"what": "broker"}, preface="Let me check the broker too, then I'll grab it.", id="c2"),
+                       "It's booked, load RO-1."], ttft_s=0.05)
+        agent = _mock_agent(stt=MockSTT([]), llm=llm, tts=MockTTS(ttfa_s=0.05), player=player, segmenter=None, frames=None,
+                            settings=_settings(filler_after_ms=0, hold_tool_narration=hold), log=log, tools=tools)
+        m = await asyncio.wait_for(agent.say("book it"), timeout=20)
+        results[hold] = m.assistant_text
+        if hold:
+            c.ok("One sec." in m.assistant_text and "It's booked, load RO-1." in m.assistant_text, f"held: {m.assistant_text!r}")
+            c.ok("check the broker" not in m.assistant_text, f"narration spoken: {m.assistant_text!r}")
+            dropped = log.first("narration_dropped")
+            c.ok(dropped is not None and "check the broker" in dropped[1]["text"], f"no narration_dropped event: {dropped}")
+        else:
+            c.ok("check the broker" in m.assistant_text, f"without the setting narration is spoken: {m.assistant_text!r}")
+    return c, {"held": results[True], "not_held": results[False]}
+
+
 SCENARIOS = [
     ("a_normal_two_turns", scenario_normal_two_turns),
     ("b_barge_in", scenario_barge_in),
@@ -1115,6 +1147,7 @@ SCENARIOS = [
     ("zb_echo_transcript_after_she_stopped", scenario_echo_transcript_after_she_stopped),
     ("zc_tool_gate", scenario_tool_gate),
     ("zd_tool_router", scenario_tool_router),
+    ("ze_tool_narration_held", scenario_tool_narration_held),
 ]
 
 
