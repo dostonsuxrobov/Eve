@@ -37,6 +37,14 @@ she *sounds and feels*. Measurements own what is *true*: latency, VRAM, credits,
   every response reports into `usage.json`; the console shows it per turn and warns at 80 %.
 * **English only** (since 2026-09-23); the Russian persona and data are in the first archive.
 
+## Decision (owner, 2026-09-27): the MVP runs on GPT-Live + gpt-5.6-luna
+
+After comparing 13 stacks on six spoken dispatcher calls, the owner chose OpenAI GPT-Live with the
+luna backend: 28/28 checks, 1.1 s to her first word, $0.05 a minute, and the most real to his ear.
+The whole study, the open-model survey and the lessons: `docs/VOICE_AGENT_REPORT.md`. Eva's own loop
+stays the companion and the fallback; open speech-to-speech is the feel benchmark and the cost option
+at scale. Keep the tools and data backend-agnostic.
+
 ## The dispatch MVP (owner's direction, 2026-09-27)
 
 The owner wants a useful product in front of real users before any GPU spend: build the job layer
